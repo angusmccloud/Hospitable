@@ -1,0 +1,237 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Hospitable tools - ingestion to DynamoDB
+
+Parameters:
+  StageName:
+    Type: String
+    Default: v1
+  ApiBase:
+    Type: String
+    Default: https://public.api.hospitable.com
+  HospitableTokenParam:
+    Type: String
+    Default: /hospitable/tools/token
+  WebhookSecretParam:
+    Type: String
+    Default: /hospitable/webhook/secret
+
+Globals:
+  Function:
+    Runtime: nodejs20.x
+    Timeout: 60
+    MemorySize: 512
+    Environment:
+      Variables:
+        TABLE_NAME: !Ref HospitableTable
+        HOSPITABLE_API_BASE: !Ref ApiBase
+        # Prefer SSM during deploys; code can also use HOSPITABLE_TOKEN directly if set
+        HOSPITABLE_TOKEN_PARAM: !Ref HospitableTokenParam
+
+Resources:
+  HospitableTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: HospitableData
+      BillingMode: PAY_PER_REQUEST
+      SSESpecification: { SSEEnabled: true }
+      PointInTimeRecoverySpecification: { PointInTimeRecoveryEnabled: true }
+      AttributeDefinitions:
+        - { AttributeName: pk, AttributeType: S }
+        - { AttributeName: sk, AttributeType: S }
+      KeySchema:
+        - { AttributeName: pk, KeyType: HASH }
+        - { AttributeName: sk, KeyType: RANGE }
+
+  SyncPropertiesFn:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: dist/ingest/syncProperties.handler
+      Description: Fetch properties from Hospitable and upsert into DynamoDB
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - DynamoDBCrudPolicy:
+            TableName: !Ref HospitableTable
+        - Statement:
+            - Effect: Allow
+              Action: ssm:GetParameter
+              Resource: !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${HospitableTokenParam}
+
+  SyncReservationsFn:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: dist/ingest/syncReservations.handler
+      Description: Fetch reservations for one or more properties and upsert into DynamoDB
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - DynamoDBCrudPolicy:
+            TableName: !Ref HospitableTable
+        - Statement:
+            - Effect: Allow
+              Action: ssm:GetParameter
+              Resource: !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${HospitableTokenParam}
+  IngestQueueDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: hospitable-webhook-dlq
+      MessageRetentionPeriod: 1209600 # 14 days
+
+  IngestQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: hospitable-webhook-queue
+      VisibilityTimeout: 120
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt IngestQueueDLQ.Arn
+        maxReceiveCount: 5
+  WebhookApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: v1
+      Cors:
+        AllowOrigin: "'*'"
+        AllowMethods: "'POST,OPTIONS'"
+
+  WebhookReceiverFn:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: dist/webhook/receiver.handler
+      Description: Verify signature + ack; enqueue payload
+      Environment:
+        Variables:
+          QUEUE_URL: !Ref IngestQueue
+          WEBHOOK_SECRET_PARAM: !Ref WebhookSecretParam
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - SQSSendMessagePolicy:
+            QueueName: !GetAtt IngestQueue.QueueName
+        - Statement:
+            - Effect: Allow
+              Action: ssm:GetParameter
+              Resource: !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${WebhookSecretParam}
+      Events:
+        PostRoute:
+          Type: Api
+          Properties:
+            RestApiId: !Ref WebhookApi
+            Path: /webhooks/hospitable
+            Method: POST
+
+  WebhookProcessorFn:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: dist/webhook/processor.handler
+      Description: Validate + upsert reservations/properties into DynamoDB
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref HospitableTable
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - DynamoDBCrudPolicy:
+            TableName: !Ref HospitableTable
+      Events:
+        FromQueue:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt IngestQueue.Arn
+            BatchSize: 10
+            MaximumBatchingWindowInSeconds: 5
+            FunctionResponseTypes: [ReportBatchItemFailures]
+  WeeklyReservationAudit:
+    Type: AWS::Events::Rule
+    Properties:
+      ScheduleExpression: rate(7 days)
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt SyncReservationsFn.Arn
+          Id: WeeklyAuditTarget
+          Input: >-
+            {"startDate":"LAST_30_DAYS","endDate":"PLUS_2_YEARS","propertyIds":[]}
+  WeeklyReservationAuditPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref SyncReservationsFn
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt WeeklyReservationAudit.Arn
+  AllowedIpsSet:
+    Type: AWS::WAFv2::IPSet
+    Properties:
+      Name: hospitable-allowed-ips
+      Scope: REGIONAL
+      IPAddressVersion: IPV4
+      Addresses:
+        - 38.80.170.0/24
+
+  WebhookWebACL:
+    Type: AWS::WAFv2::WebACL
+    Properties:
+      Name: hospitable-webhook-acl
+      Scope: REGIONAL
+      DefaultAction: { Block: {} }
+      VisibilityConfig:
+        SampledRequestsEnabled: true
+        CloudWatchMetricsEnabled: true
+        MetricName: hospitableWebhookACL
+      Rules:
+        - Name: allow-hospitable-ips
+          Priority: 1
+          Action: { Allow: {} }
+          Statement:
+            IPSetReferenceStatement:
+              Arn: !GetAtt AllowedIpsSet.Arn
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: allowHospitableIPs
+
+  WebhookWebACLAssociation:
+    Type: AWS::WAFv2::WebACLAssociation
+    DependsOn:
+      - WebhookApiv1Stage
+    Properties:
+      ResourceArn: !Sub arn:${AWS::Partition}:apigateway:${AWS::Region}::/restapis/${WebhookApi}/stages/v1
+      WebACLArn: !GetAtt WebhookWebACL.Arn
+
+  NightlyPropertiesSync:
+    Type: AWS::Events::Rule
+    Properties:
+      ScheduleExpression: rate(1 day)
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt SyncPropertiesFn.Arn
+          Id: NightlyPropertiesTarget
+
+  NightlyPropertiesSyncPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref SyncPropertiesFn
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt NightlyPropertiesSync.Arn
+
+  CleanupUnknownReservationsFn:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: dist/admin/cleanupUnknownReservations.handler
+      Description: One-time cleanup of reservations written with pk=RES#UNKNOWN
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref HospitableTable
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - DynamoDBCrudPolicy:
+            TableName: !Ref HospitableTable
+
+Outputs:
+  TableName:
+    Value: !Ref HospitableTable
+  SyncPropertiesFnName:
+    Value: !Ref SyncPropertiesFn
+  SyncReservationsFnName:
+    Value: !Ref SyncReservationsFn

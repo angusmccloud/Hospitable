@@ -1,0 +1,10 @@
+# keep dist in the published bundle (DO NOT list dist/)
+node_modules/
+.aws-sam/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+.env
+.env.*
+samconfig.toml
