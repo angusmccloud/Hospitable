@@ -102,6 +102,8 @@ Resources:
       Description: Verify signature + ack; enqueue payload
       Environment:
         Variables:
+          TABLE_NAME: !Ref HospitableTable
+          GUEST_LINK_QUEUE_URL: !Ref GuestLinkQueue
           QUEUE_URL: !Ref IngestQueue
           WEBHOOK_SECRET_PARAM: !Ref WebhookSecretParam
       Policies:
@@ -125,14 +127,17 @@ Resources:
     Properties:
       CodeUri: .
       Handler: dist/webhook/processor.handler
-      Description: Validate + upsert reservations/properties into DynamoDB
+      Description: Validate + upsert reservations/properties into DynamoDB and enqueue guest link jobs
       Environment:
         Variables:
           TABLE_NAME: !Ref HospitableTable
+          GUEST_LINK_QUEUE_URL: !Ref GuestLinkQueue
       Policies:
         - AWSLambdaBasicExecutionRole
         - DynamoDBCrudPolicy:
             TableName: !Ref HospitableTable
+        - SQSSendMessagePolicy:
+            QueueName: !GetAtt GuestLinkQueue.QueueName
       Events:
         FromQueue:
           Type: SQS
@@ -141,6 +146,7 @@ Resources:
             BatchSize: 10
             MaximumBatchingWindowInSeconds: 5
             FunctionResponseTypes: [ReportBatchItemFailures]
+  
   WeeklyReservationAudit:
     Type: AWS::Events::Rule
     Properties:
@@ -228,6 +234,69 @@ Resources:
         - DynamoDBCrudPolicy:
             TableName: !Ref HospitableTable
 
+  GuestLinkQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: guest-link-queue
+      VisibilityTimeout: 60
+      MessageRetentionPeriod: 1209600 # 14 days
+
+  GuestLinkQueueDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: guest-link-queue-dlq
+      MessageRetentionPeriod: 1209600
+
+  GuestLinkerFn:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: dist/guest/linkerWorker.handler
+      Description: Consumes GuestLinkQueue and links reservations to guests
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - DynamoDBCrudPolicy:
+            TableName: !Ref HospitableTable
+      Events:
+        FromQueue:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt GuestLinkQueue.Arn
+            BatchSize: 10
+            MaximumBatchingWindowInSeconds: 5
+            FunctionResponseTypes: [ReportBatchItemFailures]
+
+  # Let WebhookProcessor send messages to GuestLinkQueue
+  WebhookProcessorToGuestLinkQueuePolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: WebhookProcessorToGuestLinkQueuePolicy
+      Roles:
+        - !Ref WebhookProcessorFnRole
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action: sqs:SendMessage
+            Resource: !GetAtt GuestLinkQueue.Arn
+
+  GuestBackfillFn:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: dist/guest/backfill.handler
+      Description: Scan reservations and enqueue guest linking jobs
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref HospitableTable
+          GUEST_LINK_QUEUE_URL: !Ref GuestLinkQueue
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - DynamoDBReadPolicy:
+            TableName: !Ref HospitableTable
+        - SQSSendMessagePolicy:
+            QueueName: !GetAtt GuestLinkQueue.QueueName
+
 Outputs:
   TableName:
     Value: !Ref HospitableTable
@@ -235,3 +304,7 @@ Outputs:
     Value: !Ref SyncPropertiesFn
   SyncReservationsFnName:
     Value: !Ref SyncReservationsFn
+  GuestBackfillFnName:
+    Value: !Ref GuestBackfillFn
+  GuestLinkerFnName:
+    Value: !Ref GuestLinkerFn
