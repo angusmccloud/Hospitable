@@ -61,12 +61,20 @@ export function toReservationItems(rows: AnyObject[]) {
 
   return rows.map((r) => {
     const propertyId = pickPropertyId(r);
-    const id = String(r.id ?? r.reservation_id ?? cryptoRandom());
+    // Use a deterministic key if reservation id is missing
+    let id = r.id ?? r.reservation_id;
+    if (!id) {
+      // Use propertyId + arrivalDate + guestId (if available) as a fallback
+      const arrivalDate = pickArrivalDate(r);
+      const guestId = r.guest?.id ?? r.guest_id ?? "UNKNOWN";
+      id = `${propertyId}_${arrivalDate}_${guestId}`;
+    }
+    id = String(id);
     const clean = omit(r, ["status", "status_history"]); // deprecated fields
 
     return {
-      pk: `RES#${propertyId}`, // partitioned by property
-      sk: id,                  // stable sort key = reservation id
+      pk: `RES#${propertyId}`,
+      sk: id,
       entity: "reservation",
       propertyId,
       id,
