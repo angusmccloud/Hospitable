@@ -1,9 +1,10 @@
-import type { SQSBatchResponse, SQSEvent } from "aws-lambda";
-import { resolveGuestIdFromReservation, linkGuestToReservation } from "./linker";
+// src/guest/linkerWorker.ts
+import type { SQSEvent, SQSBatchResponse } from "aws-lambda";
+import { linkOrCreateGuestForReservation } from "./linkSimple";
 
 type Msg =
-  | { type: "reservation"; reservation: any } // webhook processor
-  | { type: "backfill-reservation"; reservation: any }; // backfill producer
+  | { type: "reservation"; reservation: any }
+  | { type: "backfill-reservation"; reservation: any };
 
 export const handler = async (event: SQSEvent): Promise<SQSBatchResponse> => {
   const failures: { itemIdentifier: string }[] = [];
@@ -12,15 +13,37 @@ export const handler = async (event: SQSEvent): Promise<SQSBatchResponse> => {
     try {
       const msg: Msg = JSON.parse(rec.body);
 
-      if (msg.type === "reservation" || msg.type === "backfill-reservation") {
+      if (msg && (msg.type === "reservation" || msg.type === "backfill-reservation")) {
         const r = msg.reservation;
-        const { guestId } = await resolveGuestIdFromReservation(r);
-        await linkGuestToReservation(r, guestId);
-      }
-      // ignore unknown types for now (idempotent)
+        if (!r || !r.id || !r.propertyId) {
+          console.warn("GuestLinker: skipping record with missing id/propertyId", {
+            messageId: rec.messageId,
+            hasId: Boolean(r?.id),
+            hasPropertyId: Boolean(r?.propertyId),
+          });
+          continue;
+        }
 
+        const guestId = await linkOrCreateGuestForReservation(r);
+        console.log("GuestLinker: linked reservation -> guest", {
+          messageId: rec.messageId,
+          reservationId: r.id,
+          propertyId: r.propertyId,
+          guestId,
+          source: msg.type,
+        });
+      } else {
+        // Unknown or malformed message — treat as success to avoid poison-pill loops
+        console.warn("GuestLinker: unknown message type, ignoring", {
+          messageId: rec.messageId,
+          body: rec.body?.slice(0, 500),
+        });
+      }
     } catch (err) {
-      console.error("GuestLinkerWorker failed", { messageId: rec.messageId, err });
+      console.error("GuestLinker: failed to process message", {
+        messageId: rec.messageId,
+        err,
+      });
       failures.push({ itemIdentifier: rec.messageId });
     }
   }
