@@ -29,6 +29,136 @@ Globals:
         HOSPITABLE_TOKEN_PARAM: !Ref HospitableTokenParam
 
 Resources:
+  GetGuestByConversationIdFn:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: dist/guests/getByConversationId.handler
+      Runtime: nodejs20.x
+      Timeout: 30
+      MemorySize: 256
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref HospitableTable
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:Scan
+                - dynamodb:GetItem
+                - dynamodb:Query
+                - dynamodb:BatchGetItem
+              Resource: !GetAtt HospitableTable.Arn
+      AutoPublishAlias: live
+      ProvisionedConcurrencyConfig:
+        ProvisionedConcurrentExecutions: 1
+      Events:
+        GuestByConversationId:
+          Type: Api
+          Properties:
+            RestApiId: !Ref GuestsApi
+            Path: /guests/by-conversation/{conversationId}
+            Method: GET
+  UpdateGuestHostNotesFn:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: dist/guests/updateHostNotes.handler
+      Runtime: nodejs20.x
+      Timeout: 30
+      MemorySize: 256
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref HospitableTable
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:UpdateItem
+                - dynamodb:Query
+                - dynamodb:BatchGetItem
+              Resource: !GetAtt HospitableTable.Arn
+      Events:
+        UpdateHostNotes:
+          Type: Api
+          Properties:
+            RestApiId: !Ref GuestsApi
+            Path: /guests/{guestId}/hostNotes
+            Method: PUT
+  ReservationsApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: v1
+      Cors:
+        AllowOrigin: "'*'"
+        AllowMethods: "'GET,OPTIONS'"
+      Auth:
+        DefaultAuthorizer: CognitoAuthorizer
+        Authorizers:
+          CognitoAuthorizer:
+            UserPoolArn: !GetAtt CognitoUserPool.Arn
+
+  GetReservationsFn:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: dist/reservations/getAll.handler
+      Runtime: nodejs20.x
+      Timeout: 30
+      MemorySize: 256
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref HospitableTable
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:Scan
+                - dynamodb:Query
+                - dynamodb:BatchGetItem
+              Resource: !GetAtt HospitableTable.Arn
+      Events:
+        Reservations:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ReservationsApi
+            Path: /reservations
+            Method: GET
+
+  GetReservationByIdFn:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: dist/reservations/getById.handler
+      Runtime: nodejs20.x
+      Timeout: 30
+      MemorySize: 256
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref HospitableTable
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:Scan
+                - dynamodb:Query
+                - dynamodb:BatchGetItem
+              Resource: !GetAtt HospitableTable.Arn
+      Events:
+        ReservationById:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ReservationsApi
+            Path: /reservations/{reservationId}
+            Method: GET
   HospitableTable:
     Type: AWS::DynamoDB::Table
     Properties:
@@ -95,6 +225,8 @@ Resources:
             - Effect: Allow
               Action:
                 - dynamodb:Scan
+                - dynamodb:Query
+                - dynamodb:BatchGetItem
               Resource: !GetAtt HospitableTable.Arn
       Events:
         Guests:
@@ -123,6 +255,7 @@ Resources:
               Action:
                 - dynamodb:GetItem
                 - dynamodb:Query
+                - dynamodb:BatchGetItem
               Resource: !GetAtt HospitableTable.Arn
       Events:
         GuestById:

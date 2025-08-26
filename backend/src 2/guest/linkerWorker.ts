@@ -1,7 +1,6 @@
 // src/guest/linkerWorker.ts
 import type { SQSEvent, SQSBatchResponse } from "aws-lambda";
 import { linkOrCreateGuestForReservation } from "./linkSimple";
-import { ensureGuestReservationIndex } from "../utils/reservationIndex";
 
 type Msg =
   | { type: "reservation"; reservation: any }
@@ -26,10 +25,6 @@ export const handler = async (event: SQSEvent): Promise<SQSBatchResponse> => {
         }
 
         const guestId = await linkOrCreateGuestForReservation(r);
-
-        // Ensure guest→reservation pointer exists once guestId is known
-        await ensureGuestReservationIndex(r, guestId);
-
         console.log("GuestLinker: linked reservation -> guest", {
           messageId: rec.messageId,
           reservationId: r.id,

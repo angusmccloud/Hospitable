@@ -1,14 +1,12 @@
-// src/ingest/syncReservations.ts
-import { QueryCommand } from "@aws-sdk/lib-dynamodb";
-import { doc, TABLE, upsertReservations } from "./db";
+import { batchPut, doc, TABLE } from "./db";
 import { fetchReservationsPaged } from "./hospitableClient";
 import { toReservationItems } from "./mappers";
-import { ensureConversationIndex, ensureGuestReservationIndex } from "../utils/reservationIndex";
+import { QueryCommand } from "@aws-sdk/lib-dynamodb";
 
 type EventBody = {
-  propertyIds?: string[];
-  startDate?: string; // 'YYYY-MM-DD' | 'LAST_30_DAYS'
-  endDate?: string;   // 'YYYY-MM-DD' | 'PLUS_2_YEARS'
+  propertyIds?: string[];      // optional now
+  startDate?: string;          // 'YYYY-MM-DD' or 'LAST_30_DAYS'
+  endDate?: string;            // 'YYYY-MM-DD' or 'PLUS_2_YEARS'
   include?: string[];
   perPage?: number;
 };
@@ -44,29 +42,21 @@ async function loadPropertyIdsFromDb(): Promise<string[]> {
 }
 
 export const handler = async (event: any) => {
-  const body: EventBody =
+  const body =
     event?.body ? JSON.parse(event.body) :
     (typeof event === "object" ? event : {});
 
-  // 1) Determine propertyIds (from input or DB)
-  let propertyIds = Array.isArray(body.propertyIds) ? body.propertyIds.filter(Boolean) : [];
-  if (propertyIds.length === 0) {
-    propertyIds = await loadPropertyIdsFromDb();
-  }
+  let propertyIds: string[] = Array.isArray(body.propertyIds) ? body.propertyIds.filter(Boolean) : [];
+  if (propertyIds.length === 0) propertyIds = await loadPropertyIdsFromDb();
   if (propertyIds.length === 0) {
     return { statusCode: 400, body: JSON.stringify({ error: "no properties found" }) };
   }
 
-  // 2) Date window + include fields
   const startDate = resolveStart(body.startDate);
   const endDate = resolveEnd(body.endDate);
-  const include = body.include ?? ["guest", "review", "financials", "properties"];
-  const perPage = body.perPage ?? 100;
 
-  // 3) Fetch + upsert in chunks
-  const chunkSize = 10;
   let total = 0;
-  let pages = 0;
+  const chunkSize = 10; // tune as needed
 
   for (let i = 0; i < propertyIds.length; i += chunkSize) {
     const chunk = propertyIds.slice(i, i + chunkSize);
@@ -75,36 +65,17 @@ export const handler = async (event: any) => {
       propertyIds: chunk,
       startDate,
       endDate,
-      include,
-      perPage
+      include: body.include,  // we'll auto-append 'properties' in the client
+      perPage: body.perPage
     })) {
-      pages++;
-
-      // Normalize into our reservation items
-      const items = toReservationItems(page);
-
-      // SAFE upsert (preserves existing guestId)
-      await upsertReservations(items);
-
-      // Build pointer indexes (idempotent)
-      for (const r of items) {
-        // Only writes when all 3 exist: conversation_id, propertyId, id
-        await ensureConversationIndex(r);
-
-        // Only creates/updates guest index when guestId is present
-        const gid = (r as any).guestId as string | undefined;
-        if (gid) {
-          await ensureGuestReservationIndex(r, gid);
-        }
-      }
-
+      const items = toReservationItems(page); // propertyId is derived per row
       total += items.length;
-      console.log(`syncReservations: upserted ${items.length} (running total=${total})`);
+      await batchPut(items);
     }
   }
 
   return {
     statusCode: 200,
-    body: JSON.stringify({ upserted: total, pages, startDate, endDate, properties: propertyIds.length })
+    body: JSON.stringify({ upserted: total, startDate, endDate, propertiesQueried: propertyIds.length })
   };
 };

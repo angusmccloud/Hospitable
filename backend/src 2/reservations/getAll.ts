@@ -10,24 +10,23 @@ export const handler = async () => {
     TableName: TABLE,
     FilterExpression: "#e = :entity",
     ExpressionAttributeNames: { "#e": "entity" },
-    ExpressionAttributeValues: { ":entity": "guest" },
+    ExpressionAttributeValues: { ":entity": "reservation" },
   }));
 
-  const guests = (scan.Items ?? []).map(g => ({
-    guestId: g.guestId,
-    firstName: g.firstName,
-    lastName: g.lastName,
-    emails: g.emails,
-    phoneNumbers: g.phoneNumbers,
-    reservationIds: g.reservationIds,
-    hostNotes: g.hostNotes,
-    location: g.location,
-    createdAt: g.createdAt,
-    updatedAt: g.updatedAt,
+  const reservations = (scan.Items ?? []).map(r => ({
+    reservationId: r.id,
+    propertyId: r.propertyId,
+    guestId: r.guestId ?? r.guest?.id,
+    arrivalDate: r.arrivalDate ?? r.arrival_date,
+    departureDate: r.departureDate ?? r.departure_date,
+    status: r.status,
+    createdAt: r.createdAt,
+    updatedAt: r.updatedAt,
+    // Add other relevant fields as needed
   }));
 
   return {
     statusCode: 200,
-    body: JSON.stringify({ guests }),
+    body: JSON.stringify({ reservations }),
   };
 };
