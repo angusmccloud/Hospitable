@@ -1,0 +1,11 @@
+.atc-crm .title {
+  font-weight: 600;
+}
+.atc-ul {
+  list-style: none;
+  padding-left: 0;
+  margin: 0;
+}
+.atc-row {
+  padding: 6px 0;
+}

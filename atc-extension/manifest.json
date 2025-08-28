@@ -1,0 +1,27 @@
+{
+  "manifest_version": 3,
+  "name": "ATC CRM (Hospitable)",
+  "version": "0.1.1",
+  "description": "Adds ATC CRM info to Hospitable threads.",
+  "permissions": ["identity", "storage"],
+  "host_permissions": ["https://n4kyd50ku7.execute-api.us-east-1.amazonaws.com/*"],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://my.hospitable.com/inbox/thread/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_title": "ATC CRM"
+  },
+  "icons": {
+    "16": "icon16.png",
+    "48": "icon48.png",
+    "128": "icon128.png"
+  }
+}
