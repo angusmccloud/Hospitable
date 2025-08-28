@@ -23,5 +23,17 @@
     "16": "icon16.png",
     "48": "icon48.png",
     "128": "icon128.png"
-  }
+  },
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "icon-airbnb.png",
+        "icon-cancelled.png",
+        "icon-direct.png",
+        "icon-hospitable.png",
+        "icon-vrbo.png"
+      ],
+      "matches": ["https://my.hospitable.com/*"]
+    }
+  ]
 }
