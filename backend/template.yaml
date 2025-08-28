@@ -128,7 +128,7 @@ Resources:
       StageName: v1
       Cors:
         AllowOrigin: "'*'"
-        AllowMethods: "'GET,OPTIONS'"
+        AllowMethods: "'GET,OPTIONS,PUT'"
       Auth:
         DefaultAuthorizer: CognitoAuthorizer
         Authorizers:

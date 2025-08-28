@@ -1,4 +1,6 @@
 // background.js (MV3)
+
+// ---- Cognito config ----
 const COGNITO = {
   domain: 'https://hospitable.auth.us-east-1.amazoncognito.com',
   clientId: '3fir1iq8um652rf9gv9t6bca7u',
@@ -6,10 +8,12 @@ const COGNITO = {
   tokenEndpoint: 'https://hospitable.auth.us-east-1.amazoncognito.com/oauth2/token',
 };
 
+// ---- API config ----
 const API_ORIGIN = 'https://n4kyd50ku7.execute-api.us-east-1.amazonaws.com';
 const API_STAGE = 'v1';
-const API_BASE = `${API_ORIGIN}/${API_STAGE}`;
+const API_BASE = `${API_ORIGIN}/${API_STAGE}`; // e.g. https://.../v1
 
+// ------------------------ utils ------------------------
 function toQuery(params) {
   return new URLSearchParams(params).toString();
 }
@@ -37,6 +41,7 @@ function decodeJwtPayload(jwt) {
   }
 }
 
+// ------------------------ auth ------------------------
 async function beginAuth() {
   const redirectUri = chrome.identity.getRedirectURL('callback'); // https://<id>.chromiumapp.org/callback
   const state = randomHex(12);
@@ -59,7 +64,6 @@ async function beginAuth() {
     url: authorizeUrl,
     interactive: true,
   });
-
   if (!redirectResponse) throw new Error('No redirect response from identity flow');
 
   const urlObj = new URL(redirectResponse);
@@ -81,7 +85,6 @@ async function beginAuth() {
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: form.toString(),
   });
-
   if (!tokenRes.ok) {
     const text = await tokenRes.text().catch(() => '');
     throw new Error(`Token exchange failed: ${tokenRes.status} ${text}`);
@@ -95,22 +98,18 @@ async function beginAuth() {
   return tokens;
 }
 
-// Return a **valid ID token** (what API Gateway’s Cognito authorizer expects)
+// Return a valid **id_token** (what the API’s Cognito authorizer expects)
 async function getValidIdToken() {
   const st = await chrome.storage.local.get(['atcTokens', 'atcTokenSavedAt']);
   let tokens = st.atcTokens;
 
-  // If we have an id_token and it's likely still valid, use it.
   if (tokens?.id_token && tokens?.expires_in && st.atcTokenSavedAt) {
     const ageMs = Date.now() - st.atcTokenSavedAt;
-    if (ageMs < (tokens.expires_in - 60) * 1000) {
-      return tokens.id_token;
-    }
+    if (ageMs < (tokens.expires_in - 60) * 1000) return tokens.id_token;
   }
 
   const redirectUri = chrome.identity.getRedirectURL('callback');
 
-  // Try refresh if we have a refresh_token
   if (tokens?.refresh_token) {
     const form = new URLSearchParams({
       grant_type: 'refresh_token',
@@ -118,13 +117,11 @@ async function getValidIdToken() {
       refresh_token: tokens.refresh_token,
       redirect_uri: redirectUri,
     });
-
     const res = await fetch(COGNITO.tokenEndpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: form.toString(),
     });
-
     if (res.ok) {
       const refreshed = await res.json();
       const merged = { ...tokens, ...refreshed, refresh_token: tokens.refresh_token || refreshed.refresh_token };
@@ -141,30 +138,71 @@ async function getValidIdToken() {
   return tokens.id_token;
 }
 
-chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+// If we ever get 401, clear tokens so the next call can re-auth
+async function maybeResetAuthOn401(res) {
+  if (res && res.status === 401) {
+    await chrome.storage.local.remove(['atcTokens', 'atcTokenSavedAt']);
+  }
+}
+
+// ------------------------ API calls ------------------------
+async function apiFetchConversation(conversationId) {
+  const idToken = await getValidIdToken();
+  const url = `${API_BASE}/guests/by-conversation/${encodeURIComponent(conversationId)}`;
+  console.log('[ATC] Fetching convo', conversationId);
+
+  const r = await fetch(url, {
+    headers: { Authorization: `Bearer ${idToken}` },
+  });
+
+  if (!r.ok) {
+    await maybeResetAuthOn401(r);
+    const t = await r.text().catch(() => '');
+    throw new Error(`API ${r.status}: ${t || r.statusText}`);
+  }
+  return r.json();
+}
+
+async function apiUpdateHostNotes(guestId, hostNotes) {
+  const idToken = await getValidIdToken();
+  const url = `${API_BASE}/guests/${encodeURIComponent(guestId)}/hostNotes`;
+
+  const r = await fetch(url, {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${idToken}`,
+    },
+    body: JSON.stringify({ hostNotes }),
+  });
+
+  if (!r.ok) {
+    await maybeResetAuthOn401(r);
+    const t = await r.text().catch(() => '');
+    throw new Error(`API ${r.status}: ${t || r.statusText}`);
+  }
+  return { ok: true };
+}
+
+// ------------------------ message router ------------------------
+chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   (async () => {
-    if (msg?.type === 'ATC_FETCH_CONVO') {
-      try {
-        const jwt = await getValidIdToken(); // <-- use ID token
-        const { conversationId } = msg;
-        console.log('[ATC] Fetching convo', conversationId);
-
-        const resp = await fetch(
-          `${API_BASE}/guests/by-conversation/${encodeURIComponent(conversationId)}`,
-          { headers: { Authorization: `Bearer ${jwt}` } }
-        );
-
-        if (!resp.ok) {
-          const text = await resp.text().catch(() => '');
-          throw new Error(`API ${resp.status}: ${text}`);
-        }
-        const data = await resp.json();
+    try {
+      if (msg?.type === 'ATC_FETCH_CONVO') {
+        const data = await apiFetchConversation(msg.conversationId);
         sendResponse({ ok: true, data });
-      } catch (err) {
-        console.error('[ATC] handler error:', err);
-        sendResponse({ ok: false, error: String(err?.message || err) });
+        return;
       }
+      if (msg?.type === 'ATC_UPDATE_HOST_NOTES') {
+        await apiUpdateHostNotes(msg.guestId, msg.hostNotes || '');
+        sendResponse({ ok: true });
+        return;
+      }
+      sendResponse({ ok: false, error: 'Unknown message type' });
+    } catch (err) {
+      console.error('[ATC] handler error:', err);
+      sendResponse({ ok: false, error: String(err?.message || err) });
     }
   })();
-  return true; // keep port open
+  return true; // keep the channel open for async
 });
