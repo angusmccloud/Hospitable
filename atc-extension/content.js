@@ -1,15 +1,29 @@
-// content.js
+// content.js — robust SPA routing + early injection + light logs
 (() => {
-  // Matches /inbox/thread/{conversationId}
+  // Only operate on /inbox/thread/<id> pages
   const ROUTE_REGEX_PATH = /^\/inbox\/thread\/([a-f0-9-]{6,})/i;
 
-  let currentConversationId = null;
-  let lastRenderedCid = null;
+  // Timings
+  const MIN_FETCH_INTERVAL_MS = 400;
+  const CONTAINER_RETRY_MS = 400;
+  const CONTAINER_RETRY_WINDOW_MS = 12000;
+  const URL_POLL_MS = 500;
+
+  // State
+  let booted = false;
   let isFetching = false;
   let lastFetchTs = 0;
+  let currentConversationId = null;
+  let lastRenderedCid = null;
+  let containerRetryTimer = null;
+  let containerRetryEndTs = 0;
+  let lastUrl = location.href;
 
-  // ---------------- DOM helpers ----------------
-  const qs = (sel, root = document) => root.querySelector(sel);
+  // --- tiny logger to help verify injection ---
+  const log = (...a) => console.log("[ATC][content]", ...a);
+
+  // DOM helpers
+  const qs  = (sel, root = document) => root.querySelector(sel);
   const qsa = (sel, root = document) => [...root.querySelectorAll(sel)];
 
   function buildChevronSvg() {
@@ -23,10 +37,7 @@
     svg.setAttribute('style', 'min-width: 20px; height: 20px; width: 20px;');
     const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
     path.setAttribute('fill', 'currentColor');
-    path.setAttribute(
-      'd',
-      'M18.97 16.03 12 9.06l-6.97 6.97-1.06-1.06 7.145-7.145a1.26 1.26 0 0 1 1.77 0l7.145 7.145z'
-    );
+    path.setAttribute('d', 'M18.97 16.03 12 9.06l-6.97 6.97-1.06-1.06 7.145-7.145a1.26 1.26 0 0 1 1.77 0l7.145 7.145z');
     svg.appendChild(path);
     return svg;
   }
@@ -38,38 +49,23 @@
     el.style.height = `${h}px`;
   }
 
-  // --- style injection so our textarea matches Hospitable ---
+  // Minimal styles for textarea look
   function injectAtcStyles() {
     if (document.getElementById('atc-styles')) return;
     const css = `
-    ui-collapsible-card.atc-atc-card .textarea-container {
-      width: 100%;
-      margin-top: 8px;
-    }
+    ui-collapsible-card.atc-atc-card .textarea-container { width: 100%; margin-top: 8px; }
     ui-collapsible-card.atc-atc-card textarea.cdk-textarea-autosize {
-      display: block;
-      width: 100%;
-      min-height: 120px;
-      line-height: 1.5;
-      font-size: 16px;
-      padding: 16px 18px;
-      border: 1px solid #E4E2E8;
-      border-radius: 8px;
-      background: #fff;
-      transition: border-color .15s ease, box-shadow .15s ease;
-      box-sizing: border-box;
-      resize: none;
+      display: block; width: 100%; min-height: 120px; line-height: 1.5; font-size: 16px;
+      padding: 16px 18px; border: 1px solid #E4E2E8; border-radius: 8px; background: #fff;
+      transition: border-color .15s ease, box-shadow .15s ease; box-sizing: border-box; resize: none;
     }
     ui-collapsible-card.atc-atc-card textarea.cdk-textarea-autosize:focus {
-      outline: none;
-      border-color: #C9C6D1;
-      box-shadow: 0 0 0 3px rgba(83,60,184,.10);
-    }
-    `;
+      outline: none; border-color: #C9C6D1; box-shadow: 0 0 0 3px rgba(83,60,184,.10);
+    }`;
     const style = document.createElement('style');
     style.id = 'atc-styles';
     style.textContent = css;
-    document.head.appendChild(style);
+    document.documentElement.appendChild(style);
   }
 
   function createAtcCard() {
@@ -80,7 +76,7 @@
 
     const outer = document.createElement('div');
     outer.className = 'flex flex-col divider ng-star-inserted';
-    outer.setAttribute('style', 'gap: 0px;');
+    outer.style.gap = '0px';
 
     // Header
     const header = document.createElement('div');
@@ -97,15 +93,14 @@
     titleWrap.appendChild(h4);
 
     const uiIcon = document.createElement('ui-icon');
-    uiIcon.className =
-      'mat-mdc-tooltip-trigger text-gray-500 group-hover:text-primary-600 ng-star-inserted open';
+    uiIcon.className = 'mat-mdc-tooltip-trigger text-gray-500 group-hover:text-primary-600 ng-star-inserted open';
     uiIcon.setAttribute('aria-label', 'Collapse');
     uiIcon.appendChild(buildChevronSvg());
 
     header.appendChild(titleWrap);
     header.appendChild(uiIcon);
 
-    // Body block
+    // Body
     const bodyBlock = document.createElement('div');
     bodyBlock.className = 'ng-star-inserted';
     bodyBlock.setAttribute('data-atc-body', '');
@@ -113,7 +108,6 @@
     const section = document.createElement('div');
     section.className = 'section ng-star-inserted';
 
-    // Reservations title
     const titleRow = document.createElement('div');
     titleRow.className = 'label';
     titleRow.id = 'atc-res-title';
@@ -124,24 +118,22 @@
     status.id = 'atc-status';
     status.textContent = 'Loading...';
 
-    // Reservations list
     const list = document.createElement('ul');
     list.id = 'atc-res-list';
     list.style.listStyle = 'none';
     list.style.padding = '0';
     list.style.margin = '8px 0 0 0';
 
-    // Notes label
+    // Notes
     const notesLabel = document.createElement('div');
     notesLabel.className = 'label';
     notesLabel.textContent = 'Notes';
     notesLabel.style.marginTop = '16px';
 
-    // Notes container + textarea
     const notesWrap = document.createElement('div');
     notesWrap.className = 'textarea-container';
     notesWrap.id = 'atc-notes-wrap';
-    notesWrap.style.display = 'none'; // hidden until data present
+    notesWrap.style.display = 'none';
 
     const ta = document.createElement('textarea');
     ta.id = 'atc-notes';
@@ -153,7 +145,6 @@
     ta.disabled = true;
     notesWrap.appendChild(ta);
 
-    // Save indicator
     const saveHint = document.createElement('div');
     saveHint.id = 'atc-notes-save';
     saveHint.className = 'night-lighter text-sm';
@@ -161,15 +152,14 @@
     saveHint.style.display = 'none';
     notesWrap.appendChild(saveHint);
 
-    // Assemble
     section.appendChild(titleRow);
     section.appendChild(status);
     section.appendChild(list);
-    // section.appendChild(notesLabel);
+    section.appendChild(notesLabel);
     section.appendChild(notesWrap);
     bodyBlock.appendChild(section);
 
-    // collapse handling
+    // Collapse
     header.addEventListener('click', () => {
       const isOpen = uiIcon.classList.contains('open');
       if (isOpen) {
@@ -191,9 +181,8 @@
     let card = qs('ui-collapsible-card.atc-atc-card', container);
     if (!card) {
       card = createAtcCard();
-      const about = qsa('ui-collapsible-card h4').find(h =>
-        /^About\b/i.test(h.textContent || '')
-      )?.closest('ui-collapsible-card');
+      // Place before "About ..." card if present
+      const about = qsa('ui-collapsible-card h4').find(h => /^About\b/i.test(h.textContent || ''))?.closest('ui-collapsible-card');
       if (about && about.parentElement) {
         about.parentElement.insertBefore(card, about);
       } else {
@@ -221,41 +210,31 @@
     setStatus(card, 'Loading...');
     const list = qs('#atc-res-list', card);
     if (list) list.innerHTML = '';
-
-    // Make sure notes area is visible (disabled while loading)
-    const wrap = qs('#atc-notes-wrap', card);
     const ta = qs('#atc-notes', card);
     const hint = qs('#atc-notes-save', card);
-    if (wrap) wrap.style.display = ''; // <— unhide while we load
     if (ta) ta.disabled = true;
-    if (hint) {
-      hint.style.display = '';
-      hint.textContent = 'Loading…';
-    }
+    if (hint) { hint.style.display = ''; hint.textContent = 'Loading…'; }
   }
 
   function renderError(container, err) {
     const card = ensureCard(container);
     setStatus(card, 'Error loading data.');
-    const wrap = qs('#atc-notes-wrap', card);
-    if (wrap) wrap.style.display = '';
     const hint = qs('#atc-notes-save', card);
     if (hint) { hint.style.display = ''; hint.textContent = 'Error loading'; }
-    console.log('[ATC] error:', err);
+    console.error('[ATC] error:', err);
   }
 
-  // Icon selection with cancelled override
   function iconForReservation(res) {
     const url = (name) => chrome.runtime.getURL(name);
     if (res?.reservation_status?.current?.category === 'cancelled') {
       return url('icon-cancelled.png');
     }
     switch ((res?.platform || '').toLowerCase()) {
-      case 'airbnb': return url('icon-airbnb.png');
+      case 'airbnb':   return url('icon-airbnb.png');
       case 'homeaway': return url('icon-vrbo.png');
-      case 'direct': return url('icon-hospitable.png');
-      case 'manual': return url('icon-direct.png');
-      default: return url('icon-direct.png');
+      case 'direct':   return url('icon-hospitable.png');
+      case 'manual':   return url('icon-direct.png');
+      default:         return url('icon-direct.png');
     }
   }
 
@@ -276,21 +255,15 @@
     return `https://my.hospitable.com/inbox/thread/${encodeURIComponent(conversationId)}`;
   }
 
-  // ======== SHAPE-AWARE HELPERS (from your payload) ========
-  function extractGuestId(data) {
-    return data?.guest?.guestId || null;
-  }
-  function extractHostNotes(data) {
-    const v = data?.guest?.hostNotes;
-    return (v == null) ? '' : String(v);
-  }
+  // Payload helpers
+  const extractGuestId = (data) => data?.guest?.guestId || null;
+  const extractHostNotes = (data) => (data?.guest?.hostNotes == null ? '' : String(data.guest.hostNotes));
 
   function renderData(container, data) {
     const card = ensureCard(container);
     const list = qs('#atc-res-list', card);
     if (!list) return;
 
-    // Sort reservations by arrival_date DESC (most recent first)
     const reservations = Array.isArray(data?.reservations)
       ? [...data.reservations].sort((a, b) => {
           const ta = a?.arrival_date ? Date.parse(a.arrival_date) : -Infinity;
@@ -302,7 +275,6 @@
     setTitleCount(card, reservations.length);
     setStatus(card, '');
 
-    // Reservations UI
     list.innerHTML = '';
     reservations.forEach((res) => {
       const li = document.createElement('li');
@@ -317,23 +289,18 @@
       img.style.minWidth = '20px';
 
       const text = formatYearAndNights(res);
-      let textNode;
-      if (res?.conversation_id) {
-        const a = document.createElement('a');
-        a.href = hospitableThreadHref(res.conversation_id);
-        a.textContent = text;
-        a.className = 'underline';
-        a.target = '_blank';
-        a.rel = 'noopener noreferrer';
-        textNode = a;
-      } else {
-        const span = document.createElement('span');
-        span.textContent = text;
-        textNode = span;
-      }
+      const node = res?.conversation_id
+        ? Object.assign(document.createElement('a'), {
+            href: hospitableThreadHref(res.conversation_id),
+            textContent: text,
+            className: 'underline',
+            target: '_blank',
+            rel: 'noopener noreferrer'
+          })
+        : Object.assign(document.createElement('span'), { textContent: text });
 
       li.appendChild(img);
-      li.appendChild(textNode);
+      li.appendChild(node);
       list.appendChild(li);
     });
 
@@ -344,7 +311,7 @@
       list.appendChild(empty);
     }
 
-    // Notes UI
+    // Notes
     const guestId = extractGuestId(data);
     const currentNotes = extractHostNotes(data);
 
@@ -352,9 +319,9 @@
     const ta = qs('#atc-notes', card);
     const hint = qs('#atc-notes-save', card);
 
-    if (wrap) wrap.style.display = ''; // <— ensure visible once we have data
-
-    if (ta && hint) {
+    if (wrap && ta && hint) {
+      wrap.style.display = '';
+      ta.disabled = false;
       ta.value = currentNotes;
       autosizeTA(ta);
 
@@ -365,23 +332,16 @@
         ta.oninput = null;
       } else {
         hint.style.display = 'none';
-        ta.disabled = false;
-
-        // Debounced save
         let tId = null;
         let lastSent = currentNotes;
-
-        const show = (msg) => { hint.style.display = ''; hint.textContent = msg; };
+        const show = (m) => { hint.style.display = ''; hint.textContent = m; };
         const hide = () => { hint.style.display = 'none'; hint.textContent = ''; };
 
         ta.oninput = () => {
           autosizeTA(ta);
           if (tId) clearTimeout(tId);
           const val = ta.value;
-          if (val === lastSent) {
-            hide();
-            return;
-          }
+          if (val === lastSent) { hide(); return; }
           show('Saving…');
           tId = setTimeout(async () => {
             try {
@@ -392,10 +352,9 @@
               });
               if (!r?.ok) throw new Error(r?.error || 'Failed to save');
               lastSent = val;
-              show('Saved');
-              setTimeout(hide, 1200);
+              show('Saved'); setTimeout(hide, 1200);
             } catch (e) {
-              console.log('[ATC] notes save error:', e);
+              console.error('[ATC] notes save error:', e);
               show('Error saving');
             }
           }, 600);
@@ -403,8 +362,6 @@
       }
     }
   }
-
-  // --------------- SPA / route handling ----------------
 
   function getConversationIdFromLocation() {
     const m = location.pathname.match(ROUTE_REGEX_PATH);
@@ -417,20 +374,14 @@
 
   async function fetchOnce(conversationId) {
     const now = Date.now();
-    if (now - lastFetchTs < 400) return;
-    lastFetchTs = now;
+    if (now - lastFetchTs < MIN_FETCH_INTERVAL_MS) return;
     if (isFetching) return;
+    lastFetchTs = now;
     isFetching = true;
-
     try {
-      const res = await chrome.runtime.sendMessage({
-        type: 'ATC_FETCH_CONVO',
-        conversationId,
-      });
-
+      const res = await chrome.runtime.sendMessage({ type: 'ATC_FETCH_CONVO', conversationId });
       const container = findCardsContainer();
       if (!container) return;
-
       if (!res?.ok) throw new Error(res?.error || 'Unknown error');
       renderData(container, res.data);
     } catch (err) {
@@ -442,45 +393,102 @@
     }
   }
 
-  function updateForRouteChange() {
+  function startContainerRetry(conversationId) {
+    if (containerRetryTimer) clearInterval(containerRetryTimer);
+    containerRetryEndTs = Date.now() + CONTAINER_RETRY_WINDOW_MS;
+    containerRetryTimer = setInterval(() => {
+      const container = findCardsContainer();
+      if (container) {
+        clearInterval(containerRetryTimer);
+        containerRetryTimer = null;
+        renderLoading(container);
+        fetchOnce(conversationId);
+      } else if (Date.now() > containerRetryEndTs) {
+        clearInterval(containerRetryTimer);
+        containerRetryTimer = null;
+        log('container not found within window; giving up for now');
+      }
+    }, CONTAINER_RETRY_MS);
+  }
+
+  function onRouteMaybeChanged() {
     const cid = getConversationIdFromLocation();
+
+    // Only run on thread pages
     if (!cid) return;
 
     if (cid === currentConversationId && cid === lastRenderedCid) return;
     currentConversationId = cid;
 
     const container = findCardsContainer();
-    if (!container) return;
-    renderLoading(container);
-    fetchOnce(cid);
+    if (container) {
+      renderLoading(container);
+      fetchOnce(cid);
+    } else {
+      startContainerRetry(cid);
+    }
   }
 
+  // Patch history so SPA navigations always notify us
+  function installHistoryHook() {
+    if (history.___atcPatched) return;
+    const origPush = history.pushState;
+    const origReplace = history.replaceState;
+    const fire = () => window.dispatchEvent(new Event('atc:location-changed'));
+    history.pushState = function(...args) { const r = origPush.apply(this, args); fire(); return r; };
+    history.replaceState = function(...args) { const r = origReplace.apply(this, args); fire(); return r; };
+    history.___atcPatched = true;
+  }
+
+  // Debounced scheduler
   const schedule = (() => {
     let raf = null;
     return () => {
       if (raf) cancelAnimationFrame(raf);
-      raf = requestAnimationFrame(() => {
-        raf = null;
-        updateForRouteChange();
-      });
+      raf = requestAnimationFrame(() => { raf = null; onRouteMaybeChanged(); });
     };
   })();
 
-  document.addEventListener('readystatechange', () => {
-    if (document.readyState === 'interactive' || document.readyState === 'complete') {
-      schedule();
-    }
-  });
-  schedule();
+  function boot() {
+    if (booted) return;
+    booted = true;
+    log('boot');
 
-  let lastHref = location.href;
-  new MutationObserver(() => {
-    if (location.href !== lastHref) {
-      lastHref = location.href;
-      schedule();
-    }
-  }).observe(document, { subtree: true, childList: true });
+    installHistoryHook();
+    window.addEventListener('atc:location-changed', schedule);
+    window.addEventListener('popstate', schedule);
 
-  const rootObs = new MutationObserver(() => schedule());
-  rootObs.observe(document.documentElement, { childList: true, subtree: true });
+    // Observe heavy DOM changes (Angular re-renders)
+    const rootObs = new MutationObserver(schedule);
+    rootObs.observe(document.documentElement, { childList: true, subtree: true });
+
+    // Run when DOM is ready (we injected at document_start)
+    if (document.readyState === 'complete' || document.readyState === 'interactive') {
+      schedule();
+    } else {
+      document.addEventListener('readystatechange', () => {
+        if (document.readyState === 'interactive' || document.readyState === 'complete') {
+          schedule();
+        }
+      });
+    }
+
+    // URL poller as a last resort (some apps bypass pushState/replaceState helpers)
+    setInterval(() => {
+      if (location.href !== lastUrl) {
+        lastUrl = location.href;
+        log('url poll detected change:', lastUrl);
+        schedule();
+      }
+    }, URL_POLL_MS);
+
+    // Kick a few times during slow boots
+    let tries = 0;
+    const kick = setInterval(() => {
+      tries++; schedule();
+      if (tries >= 10) clearInterval(kick);
+    }, 300);
+  }
+
+  boot();
 })();
