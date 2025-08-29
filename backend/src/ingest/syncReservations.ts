@@ -1,5 +1,6 @@
 // src/ingest/syncReservations.ts
 import { QueryCommand } from "@aws-sdk/lib-dynamodb";
+import { SQSClient, SendMessageBatchCommand } from "@aws-sdk/client-sqs";
 import { doc, TABLE, upsertReservations } from "./db";
 import { fetchReservationsPaged } from "./hospitableClient";
 import { toReservationItems } from "./mappers";
@@ -12,6 +13,9 @@ type EventBody = {
   include?: string[];
   perPage?: number;
 };
+
+const sqs = new SQSClient({});
+const GUEST_LINK_QUEUE_URL = process.env.GUEST_LINK_QUEUE_URL!; // <-- add in template
 
 const toISO = (d: Date) => d.toISOString().slice(0, 10);
 
@@ -43,6 +47,35 @@ async function loadPropertyIdsFromDb(): Promise<string[]> {
   return (res.Items ?? []).map(i => String(i.sk));
 }
 
+async function enqueueMissingGuestLinks(reservations: any[]) {
+  // Enqueue ONLY those without a guestId
+  const toLink = reservations.filter(r => !r?.guestId);
+
+  if (!toLink.length) return { enqueued: 0 };
+
+  // Batch into SQS batches of 10
+  const BATCH = 10;
+  let enqueued = 0;
+
+  for (let i = 0; i < toLink.length; i += BATCH) {
+    const chunk = toLink.slice(i, i + BATCH);
+
+    await sqs.send(new SendMessageBatchCommand({
+      QueueUrl: GUEST_LINK_QUEUE_URL,
+      Entries: chunk.map((r, idx) => ({
+        Id: `${i + idx}`,
+        // Reuse the same message shape your GuestBackfillFn emits
+        // so GuestLinkerFn doesn't need to special-case.
+        MessageBody: JSON.stringify({ type: "backfill-reservation", reservation: r }),
+      }))
+    }));
+
+    enqueued += chunk.length;
+  }
+
+  return { enqueued };
+}
+
 export const handler = async (event: any) => {
   const body: EventBody =
     event?.body ? JSON.parse(event.body) :
@@ -67,6 +100,7 @@ export const handler = async (event: any) => {
   const chunkSize = 10;
   let total = 0;
   let pages = 0;
+  let linkJobs = 0;
 
   for (let i = 0; i < propertyIds.length; i += chunkSize) {
     const chunk = propertyIds.slice(i, i + chunkSize);
@@ -98,13 +132,24 @@ export const handler = async (event: any) => {
         }
       }
 
+      // NEW: Enqueue link jobs for any reservation that *still* lacks guestId
+      const { enqueued } = await enqueueMissingGuestLinks(items);
+      linkJobs += enqueued;
+
       total += items.length;
-      console.log(`syncReservations: upserted ${items.length} (running total=${total})`);
+      console.log(`syncReservations: upserted ${items.length} (running total=${total}, linkJobs+${enqueued})`);
     }
   }
 
   return {
     statusCode: 200,
-    body: JSON.stringify({ upserted: total, pages, startDate, endDate, properties: propertyIds.length })
+    body: JSON.stringify({
+      upserted: total,
+      pages,
+      startDate,
+      endDate,
+      properties: propertyIds.length,
+      linkJobsEnqueued: linkJobs
+    })
   };
 };

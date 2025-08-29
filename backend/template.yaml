@@ -361,6 +361,12 @@ Resources:
       CodeUri: .
       Handler: dist/ingest/syncReservations.handler
       Description: Fetch reservations for one or more properties and upsert into DynamoDB
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref HospitableTable
+          HOSPITABLE_API_BASE: !Ref ApiBase
+          HOSPITABLE_TOKEN_PARAM: !Ref HospitableTokenParam
+          GUEST_LINK_QUEUE_URL: !Ref GuestLinkQueue
       Policies:
         - AWSLambdaBasicExecutionRole
         - DynamoDBCrudPolicy:
@@ -369,6 +375,8 @@ Resources:
             - Effect: Allow
               Action: ssm:GetParameter
               Resource: !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${HospitableTokenParam}
+        - SQSSendMessagePolicy:
+            QueueName: !GetAtt GuestLinkQueue.QueueName
 
   # -----------------------
   # Webhooks (SQS pipeline)
@@ -568,24 +576,41 @@ Resources:
       Principal: events.amazonaws.com
       SourceArn: !GetAtt NightlyPropertiesSync.Arn
 
-  WeeklyReservationAudit:
+  NightlyReservationCatchup:
     Type: AWS::Events::Rule
     Properties:
-      ScheduleExpression: rate(7 days)
+      ScheduleExpression: rate(1 day)
       State: ENABLED
       Targets:
         - Arn: !GetAtt SyncReservationsFn.Arn
-          Id: WeeklyAuditTarget
+          Id: NightlyReservationCatchupTarget
           Input: >-
             {"startDate":"LAST_30_DAYS","endDate":"PLUS_2_YEARS","propertyIds":[]}
 
-  WeeklyReservationAuditPermission:
+  NightlyReservationCatchupPermission:
     Type: AWS::Lambda::Permission
     Properties:
       Action: lambda:InvokeFunction
       FunctionName: !Ref SyncReservationsFn
       Principal: events.amazonaws.com
-      SourceArn: !GetAtt WeeklyReservationAudit.Arn
+      SourceArn: !GetAtt NightlyReservationCatchup.Arn
+
+  NightlyGuestCatchup:
+    Type: AWS::Events::Rule
+    Properties:
+      ScheduleExpression: rate(1 day)
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt GuestBackfillFn.Arn
+          Id: NightlyGuestCatchupTarget
+
+  NightlyGuestCatchupPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref GuestBackfillFn
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt NightlyGuestCatchup.Arn
 
   # -----------------------
   # One-off admin
