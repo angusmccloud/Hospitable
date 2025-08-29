@@ -16,6 +16,24 @@ Parameters:
     Type: String
     Default: /hospitable/webhook/secret
 
+  # Use an EXISTING Cognito Hosted UI domain; this stack will not create one.
+  ExistingHostedDomain:
+    Type: String
+    Default: "https://hospitable.auth.us-east-1.amazoncognito.com"
+    Description: "Full Hosted UI domain, e.g. https://<prefix>.auth.us-east-1.amazoncognito.com"
+
+  # Chrome Extension ID to compose callback/logout redirect URIs
+  ExtensionId:
+    Type: String
+    Default: ""
+    Description: "Chrome extension ID; if set, callback/logout URLs are chrome-extension://<id>/..."
+
+  # Token lifetime config
+  RefreshTokenDays:
+    Type: Number
+    Default: 365
+    Description: "Refresh token lifetime in days (e.g., 365 ≈ 1 year)"
+
 Globals:
   Function:
     Runtime: nodejs20.x
@@ -25,10 +43,15 @@ Globals:
       Variables:
         TABLE_NAME: !Ref HospitableTable
         HOSPITABLE_API_BASE: !Ref ApiBase
-        # Prefer SSM during deploys; code can also use HOSPITABLE_TOKEN directly if set
         HOSPITABLE_TOKEN_PARAM: !Ref HospitableTokenParam
 
+Conditions:
+  HasExtensionId: !Not [ !Equals [ !Ref ExtensionId, "" ] ]
+
 Resources:
+  # -----------------------
+  # Core Data Store
+  # -----------------------
   HospitableTable:
     Type: AWS::DynamoDB::Table
     Properties:
@@ -42,6 +65,280 @@ Resources:
       KeySchema:
         - { AttributeName: pk, KeyType: HASH }
         - { AttributeName: sk, KeyType: RANGE }
+
+  # -----------------------
+  # Cognito (Pool + Client)
+  # -----------------------
+  CognitoUserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: hospitable-user-pool
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+      UsernameAttributes: [ email ]
+      Schema:
+        - AttributeDataType: String
+          Name: email
+          Required: true
+
+  CognitoUserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      UserPoolId: !Ref CognitoUserPool
+      ClientName: hospitable-user-pool-client
+      GenerateSecret: false
+
+      # OAuth / Hosted UI
+      AllowedOAuthFlowsUserPoolClient: true
+      AllowedOAuthFlows: [ code ]
+      AllowedOAuthScopes: [ openid, email, phone, profile ]
+      SupportedIdentityProviders: [ COGNITO ]
+
+      # Build redirect URIs from the extension ID when provided
+      CallbackURLs:
+        - !If
+          - HasExtensionId
+          - !Sub "chrome-extension://${ExtensionId}/callback"
+          - !Ref "AWS::NoValue"
+      LogoutURLs:
+        - !If
+          - HasExtensionId
+          - !Sub "chrome-extension://${ExtensionId}/logout"
+          - !Ref "AWS::NoValue"
+
+      # Token lifetimes
+      AccessTokenValidity: 60        # minutes
+      IdTokenValidity: 60            # minutes
+      RefreshTokenValidity: !Ref RefreshTokenDays
+      TokenValidityUnits:
+        AccessToken: minutes
+        IdToken: minutes
+        RefreshToken: days
+
+      EnableTokenRevocation: true
+      PreventUserExistenceErrors: ENABLED
+
+  # -----------------------
+  # APIs (guests & reservations)
+  # -----------------------
+  GuestsApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: v1
+      Cors:
+        AllowOrigin: "'*'"
+        AllowMethods: "'GET,OPTIONS,PUT'"
+      Auth:
+        DefaultAuthorizer: CognitoAuthorizer
+        Authorizers:
+          CognitoAuthorizer:
+            UserPoolArn: !GetAtt CognitoUserPool.Arn
+
+  ReservationsApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: v1
+      Cors:
+        AllowOrigin: "'*'"
+        AllowMethods: "'GET,OPTIONS'"
+      Auth:
+        DefaultAuthorizer: CognitoAuthorizer
+        Authorizers:
+          CognitoAuthorizer:
+            UserPoolArn: !GetAtt CognitoUserPool.Arn
+
+  WebhookApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: v1
+      Cors:
+        AllowOrigin: "'*'"
+        AllowMethods: "'POST,OPTIONS'"
+
+  # -----------------------
+  # Guest endpoints
+  # -----------------------
+  GetGuestByConversationIdFn:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: dist/guests/getByConversationId.handler
+      Runtime: nodejs20.x
+      Timeout: 30
+      MemorySize: 256
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref HospitableTable
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:Scan
+                - dynamodb:GetItem
+                - dynamodb:Query
+                - dynamodb:BatchGetItem
+              Resource: !GetAtt HospitableTable.Arn
+      AutoPublishAlias: live
+      ProvisionedConcurrencyConfig:
+        ProvisionedConcurrentExecutions: 1
+      Events:
+        GuestByConversationId:
+          Type: Api
+          Properties:
+            RestApiId: !Ref GuestsApi
+            Path: /guests/by-conversation/{conversationId}
+            Method: GET
+
+  GetGuestsFn:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: dist/guests/getAll.handler
+      Runtime: nodejs20.x
+      Timeout: 30
+      MemorySize: 256
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref HospitableTable
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:Scan
+                - dynamodb:Query
+                - dynamodb:BatchGetItem
+              Resource: !GetAtt HospitableTable.Arn
+      Events:
+        Guests:
+          Type: Api
+          Properties:
+            RestApiId: !Ref GuestsApi
+            Path: /guests
+            Method: GET
+
+  GetGuestByIdFn:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: dist/guests/getById.handler
+      Runtime: nodejs20.x
+      Timeout: 30
+      MemorySize: 256
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref HospitableTable
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:GetItem
+                - dynamodb:Query
+                - dynamodb:BatchGetItem
+              Resource: !GetAtt HospitableTable.Arn
+      Events:
+        GuestById:
+          Type: Api
+          Properties:
+            RestApiId: !Ref GuestsApi
+            Path: /guests/{guestId}
+            Method: GET
+
+  UpdateGuestHostNotesFn:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: dist/guests/updateHostNotes.handler
+      Runtime: nodejs20.x
+      Timeout: 30
+      MemorySize: 256
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref HospitableTable
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:UpdateItem
+                - dynamodb:Query
+                - dynamodb:BatchGetItem
+              Resource: !GetAtt HospitableTable.Arn
+      Events:
+        UpdateHostNotes:
+          Type: Api
+          Properties:
+            RestApiId: !Ref GuestsApi
+            Path: /guests/{guestId}/hostNotes
+            Method: PUT
+
+  # -----------------------
+  # Reservation endpoints
+  # -----------------------
+  GetReservationsFn:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: dist/reservations/getAll.handler
+      Runtime: nodejs20.x
+      Timeout: 30
+      MemorySize: 256
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref HospitableTable
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:Scan
+                - dynamodb:Query
+                - dynamodb:BatchGetItem
+              Resource: !GetAtt HospitableTable.Arn
+      Events:
+        Reservations:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ReservationsApi
+            Path: /reservations
+            Method: GET
+
+  GetReservationByIdFn:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: dist/reservations/getById.handler
+      Runtime: nodejs20.x
+      Timeout: 30
+      MemorySize: 256
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref HospitableTable
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:Scan
+                - dynamodb:Query
+                - dynamodb:BatchGetItem
+              Resource: !GetAtt HospitableTable.Arn
+      Events:
+        ReservationById:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ReservationsApi
+            Path: /reservations/{reservationId}
+            Method: GET
 
   SyncPropertiesFn:
     Type: AWS::Serverless::Function
@@ -64,6 +361,12 @@ Resources:
       CodeUri: .
       Handler: dist/ingest/syncReservations.handler
       Description: Fetch reservations for one or more properties and upsert into DynamoDB
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref HospitableTable
+          HOSPITABLE_API_BASE: !Ref ApiBase
+          HOSPITABLE_TOKEN_PARAM: !Ref HospitableTokenParam
+          GUEST_LINK_QUEUE_URL: !Ref GuestLinkQueue
       Policies:
         - AWSLambdaBasicExecutionRole
         - DynamoDBCrudPolicy:
@@ -72,6 +375,12 @@ Resources:
             - Effect: Allow
               Action: ssm:GetParameter
               Resource: !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${HospitableTokenParam}
+        - SQSSendMessagePolicy:
+            QueueName: !GetAtt GuestLinkQueue.QueueName
+
+  # -----------------------
+  # Webhooks (SQS pipeline)
+  # -----------------------
   IngestQueueDLQ:
     Type: AWS::SQS::Queue
     Properties:
@@ -86,13 +395,6 @@ Resources:
       RedrivePolicy:
         deadLetterTargetArn: !GetAtt IngestQueueDLQ.Arn
         maxReceiveCount: 5
-  WebhookApi:
-    Type: AWS::Serverless::Api
-    Properties:
-      StageName: v1
-      Cors:
-        AllowOrigin: "'*'"
-        AllowMethods: "'POST,OPTIONS'"
 
   WebhookReceiverFn:
     Type: AWS::Serverless::Function
@@ -146,24 +448,75 @@ Resources:
             BatchSize: 10
             MaximumBatchingWindowInSeconds: 5
             FunctionResponseTypes: [ReportBatchItemFailures]
-  
-  WeeklyReservationAudit:
-    Type: AWS::Events::Rule
+
+  # -----------------------
+  # Guest linking worker + backfill
+  # -----------------------
+  GuestLinkQueue:
+    Type: AWS::SQS::Queue
     Properties:
-      ScheduleExpression: rate(7 days)
-      State: ENABLED
-      Targets:
-        - Arn: !GetAtt SyncReservationsFn.Arn
-          Id: WeeklyAuditTarget
-          Input: >-
-            {"startDate":"LAST_30_DAYS","endDate":"PLUS_2_YEARS","propertyIds":[]}
-  WeeklyReservationAuditPermission:
-    Type: AWS::Lambda::Permission
+      QueueName: guest-link-queue
+      VisibilityTimeout: 60
+      MessageRetentionPeriod: 1209600 # 14 days
+
+  GuestLinkQueueDLQ:
+    Type: AWS::SQS::Queue
     Properties:
-      Action: lambda:InvokeFunction
-      FunctionName: !Ref SyncReservationsFn
-      Principal: events.amazonaws.com
-      SourceArn: !GetAtt WeeklyReservationAudit.Arn
+      QueueName: guest-link-queue-dlq
+      MessageRetentionPeriod: 1209600
+
+  GuestLinkerFn:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: dist/guest/linkerWorker.handler
+      Description: Consumes GuestLinkQueue and links reservations to guests
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - DynamoDBCrudPolicy:
+            TableName: !Ref HospitableTable
+      Events:
+        FromQueue:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt GuestLinkQueue.Arn
+            BatchSize: 10
+            MaximumBatchingWindowInSeconds: 5
+            FunctionResponseTypes: [ReportBatchItemFailures]
+
+  WebhookProcessorToGuestLinkQueuePolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: WebhookProcessorToGuestLinkQueuePolicy
+      Roles:
+        - !Ref WebhookProcessorFnRole
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action: sqs:SendMessage
+            Resource: !GetAtt GuestLinkQueue.Arn
+
+  GuestBackfillFn:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: dist/guest/backfill.handler
+      Description: Scan reservations and enqueue guest linking jobs
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref HospitableTable
+          GUEST_LINK_QUEUE_URL: !Ref GuestLinkQueue
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - DynamoDBReadPolicy:
+            TableName: !Ref HospitableTable
+        - SQSSendMessagePolicy:
+            QueueName: !GetAtt GuestLinkQueue.QueueName
+
+  # -----------------------
+  # WAF for the webhook
+  # -----------------------
   AllowedIpsSet:
     Type: AWS::WAFv2::IPSet
     Properties:
@@ -203,6 +556,9 @@ Resources:
       ResourceArn: !Sub arn:${AWS::Partition}:apigateway:${AWS::Region}::/restapis/${WebhookApi}/stages/v1
       WebACLArn: !GetAtt WebhookWebACL.Arn
 
+  # -----------------------
+  # Schedules
+  # -----------------------
   NightlyPropertiesSync:
     Type: AWS::Events::Rule
     Properties:
@@ -220,6 +576,45 @@ Resources:
       Principal: events.amazonaws.com
       SourceArn: !GetAtt NightlyPropertiesSync.Arn
 
+  NightlyReservationCatchup:
+    Type: AWS::Events::Rule
+    Properties:
+      ScheduleExpression: rate(1 day)
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt SyncReservationsFn.Arn
+          Id: NightlyReservationCatchupTarget
+          Input: >-
+            {"startDate":"LAST_30_DAYS","endDate":"PLUS_2_YEARS","propertyIds":[]}
+
+  NightlyReservationCatchupPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref SyncReservationsFn
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt NightlyReservationCatchup.Arn
+
+  NightlyGuestCatchup:
+    Type: AWS::Events::Rule
+    Properties:
+      ScheduleExpression: rate(1 day)
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt GuestBackfillFn.Arn
+          Id: NightlyGuestCatchupTarget
+
+  NightlyGuestCatchupPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref GuestBackfillFn
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt NightlyGuestCatchup.Arn
+
+  # -----------------------
+  # One-off admin
+  # -----------------------
   CleanupUnknownReservationsFn:
     Type: AWS::Serverless::Function
     Properties:
@@ -234,72 +629,10 @@ Resources:
         - DynamoDBCrudPolicy:
             TableName: !Ref HospitableTable
 
-  GuestLinkQueue:
-    Type: AWS::SQS::Queue
-    Properties:
-      QueueName: guest-link-queue
-      VisibilityTimeout: 60
-      MessageRetentionPeriod: 1209600 # 14 days
-
-  GuestLinkQueueDLQ:
-    Type: AWS::SQS::Queue
-    Properties:
-      QueueName: guest-link-queue-dlq
-      MessageRetentionPeriod: 1209600
-
-  GuestLinkerFn:
-    Type: AWS::Serverless::Function
-    Properties:
-      CodeUri: .
-      Handler: dist/guest/linkerWorker.handler
-      Description: Consumes GuestLinkQueue and links reservations to guests
-      Policies:
-        - AWSLambdaBasicExecutionRole
-        - DynamoDBCrudPolicy:
-            TableName: !Ref HospitableTable
-      Events:
-        FromQueue:
-          Type: SQS
-          Properties:
-            Queue: !GetAtt GuestLinkQueue.Arn
-            BatchSize: 10
-            MaximumBatchingWindowInSeconds: 5
-            FunctionResponseTypes: [ReportBatchItemFailures]
-
-  # Let WebhookProcessor send messages to GuestLinkQueue
-  WebhookProcessorToGuestLinkQueuePolicy:
-    Type: AWS::IAM::Policy
-    Properties:
-      PolicyName: WebhookProcessorToGuestLinkQueuePolicy
-      Roles:
-        - !Ref WebhookProcessorFnRole
-      PolicyDocument:
-        Version: "2012-10-17"
-        Statement:
-          - Effect: Allow
-            Action: sqs:SendMessage
-            Resource: !GetAtt GuestLinkQueue.Arn
-
-  GuestBackfillFn:
-    Type: AWS::Serverless::Function
-    Properties:
-      CodeUri: .
-      Handler: dist/guest/backfill.handler
-      Description: Scan reservations and enqueue guest linking jobs
-      Environment:
-        Variables:
-          TABLE_NAME: !Ref HospitableTable
-          GUEST_LINK_QUEUE_URL: !Ref GuestLinkQueue
-      Policies:
-        - AWSLambdaBasicExecutionRole
-        - DynamoDBReadPolicy:
-            TableName: !Ref HospitableTable
-        - SQSSendMessagePolicy:
-            QueueName: !GetAtt GuestLinkQueue.QueueName
-
 Outputs:
   TableName:
     Value: !Ref HospitableTable
+
   SyncPropertiesFnName:
     Value: !Ref SyncPropertiesFn
   SyncReservationsFnName:
@@ -308,3 +641,13 @@ Outputs:
     Value: !Ref GuestBackfillFn
   GuestLinkerFnName:
     Value: !Ref GuestLinkerFn
+
+  CognitoUserPoolId:
+    Value: !Ref CognitoUserPool
+    Export:
+      Name: !Sub "${AWS::StackName}:CognitoUserPoolId"
+
+  CognitoUserPoolClientId:
+    Value: !Ref CognitoUserPoolClient
+    Export:
+      Name: !Sub "${AWS::StackName}:CognitoUserPoolClientId"
