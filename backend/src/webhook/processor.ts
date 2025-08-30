@@ -1,8 +1,8 @@
 // src/webhook/processor.ts
 import type { SQSBatchResponse, SQSEvent } from "aws-lambda";
+import { SQSClient, SendMessageCommand } from "@aws-sdk/client-sqs";
 import { upsertReservations, batchPut } from "../ingest/db";
 import { toReservationItems, toPropertyItems } from "../ingest/mappers";
-import { SQSClient, SendMessageCommand } from "@aws-sdk/client-sqs";
 import { ensureConversationIndex, ensureGuestReservationIndex } from "../utils/reservationIndex";
 
 const sqs = new SQSClient({});
@@ -13,46 +13,146 @@ export const handler = async (event: SQSEvent): Promise<SQSBatchResponse> => {
 
   for (const rec of event.Records) {
     try {
-      const payload = JSON.parse(rec.body);
-      const data = payload.body;
-      const action = data?.action as string | undefined;
+      // Receiver enqueues: { headers, body, receivedAt, ... }
+      const msg = JSON.parse(rec.body);
+      const webhook = msg?.body ?? msg ?? {};
+      const action = String(webhook?.action || "");
+      const created = webhook?.created;
 
-      console.log("WebhookProcessor: action =", action);
+      // Per docs, payload is inside `data`
+      const payload = webhook?.data ?? webhook?.reservation ?? webhook;
 
-      if (action?.startsWith("reservation.")) {
-        const resObj = data?.reservation ?? data;
-        const items = toReservationItems([resObj]);
-        const r = items[0];
+      console.log(
+        JSON.stringify({
+          level: "info",
+          msg: "webhook:processor:received",
+          action,
+          created,
+          hasData: Boolean(webhook?.data),
+          keys: payload && typeof payload === "object" ? Object.keys(payload).slice(0, 10) : [],
+        })
+      );
 
-        // SAFE write that preserves any existing guestId
-        await upsertReservations(items);
-
-        // Build pointer indexes *now* so API reads are fast, even before guest linking
-        await ensureConversationIndex(r);
-        const gid = (r as any).guestId as string | undefined;
-        if (gid) {
-          await ensureGuestReservationIndex(r, gid);
+      if (action.startsWith("reservation.")) {
+        const reservationSource = payload;
+        if (!reservationSource || typeof reservationSource !== "object") {
+          console.warn(
+            JSON.stringify({
+              level: "warn",
+              msg: "webhook:processor:missing_reservation_payload",
+              action,
+            })
+          );
+          continue;
         }
 
-        // Enqueue for guest linking (idempotent)
-        await sqs.send(new SendMessageCommand({
-          QueueUrl: GUEST_LINK_QUEUE_URL,
-          MessageBody: JSON.stringify({ type: "reservation", reservation: r }),
-        }));
+        const items = toReservationItems([reservationSource]);
+        if (!items.length) {
+          console.warn(
+            JSON.stringify({
+              level: "warn",
+              msg: "webhook:processor:toReservationItems_empty",
+              action,
+            })
+          );
+          continue;
+        }
+        const r = items[0];
 
-      } else if (action?.startsWith("property.")) {
-        const props = [{
-          id: String(data?.property?.id ?? data?.id),
-          name: String(data?.property?.name ?? data?.name ?? "")
-        }];
+        // Helpful trace to catch id/pk/sk mismatches quickly
+        console.log(
+          JSON.stringify({
+            level: "debug",
+            msg: "webhook:processor:reservation_ids",
+            action,
+            reservation_id_in_payload: (reservationSource as any)?.id,
+            reservation_id_in_item: (r as any)?.id,
+            property_id_in_payload:
+              (reservationSource as any)?.propertyId ??
+              (reservationSource as any)?.properties?.[0]?.id ??
+              (reservationSource as any)?.listings?.[0]?.platform_id,
+            property_id_in_item: (r as any)?.propertyId,
+            conversation_id_from_payload: (reservationSource as any)?.conversation_id,
+            conversation_id_from_item: (r as any)?.conversation_id, // mapper may or may not set this
+          })
+        );
+
+        // Idempotent upsert (preserves existing guestId in upsert)
+        await upsertReservations(items);
+
+        // Build pointer indexes (idempotent)
+        await ensureConversationIndex(r as any);
+        const gid = (r as any)?.guestId as string | undefined;
+        if (gid) {
+          await ensureGuestReservationIndex(r as any, gid);
+        }
+
+        // Kick guest linker (idempotent consumer)
+        await sqs.send(
+          new SendMessageCommand({
+            QueueUrl: GUEST_LINK_QUEUE_URL,
+            MessageBody: JSON.stringify({ type: "reservation", reservation: r }),
+          })
+        );
+
+        console.log(
+          JSON.stringify({
+            level: "info",
+            msg: "webhook:processor:reservation_upserted",
+            action,
+            reservationId: (r as any)?.id,
+            propertyId: (r as any)?.propertyId,
+          })
+        );
+      } else if (action.startsWith("property.")) {
+        const propertySource = (payload as any)?.property ?? payload;
+        if (!propertySource || typeof propertySource !== "object") {
+          console.warn(
+            JSON.stringify({
+              level: "warn",
+              msg: "webhook:processor:missing_property_payload",
+              action,
+            })
+          );
+          continue;
+        }
+
+        const props = [
+          {
+            id: String(propertySource?.id ?? ""),
+            name: String(propertySource?.name ?? ""),
+          },
+        ];
+
         await batchPut(toPropertyItems(props as any));
 
+        console.log(
+          JSON.stringify({
+            level: "info",
+            msg: "webhook:processor:property_upserted",
+            action,
+            propertyId: props[0].id,
+          })
+        );
       } else {
-        console.log("WebhookProcessor: unhandled action, skipping");
+        console.log(
+          JSON.stringify({
+            level: "info",
+            msg: "webhook:processor:unhandled_action",
+            action,
+          })
+        );
       }
-
-    } catch (err) {
-      console.error("WebhookProcessor failed", { messageId: rec.messageId, err });
+    } catch (err: any) {
+      console.error(
+        JSON.stringify({
+          level: "error",
+          msg: "webhook:processor:failed",
+          messageId: rec.messageId,
+          error: err?.message,
+          stack: err?.stack,
+        })
+      );
       failures.push({ itemIdentifier: rec.messageId });
     }
   }

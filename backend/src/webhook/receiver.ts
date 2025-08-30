@@ -25,33 +25,25 @@ function sha256Hex(payload: string) {
   return crypto.createHash("sha256").update(payload, "utf8").digest("hex");
 }
 
-/** Convert a signature header value to a Buffer, supporting:
- *  - "sha256=<hex>"
- *  - "<hex>"
- *  - base64
- */
-function parseSignatureToBuffer(headerVal: string | undefined | null): Buffer | null {
+// Returns the naked hex string if header matches one of:
+//  - "sha256=<hex>"
+//  - "<hex>"
+// Otherwise returns null.
+function extractHexSignature(headerVal?: string | null): string | null {
   if (!headerVal) return null;
   let v = String(headerVal).trim();
 
-  // Strip algo prefix if present: e.g. "sha256=abc..."
-  const eqIdx = v.indexOf("=");
-  if (eqIdx > 0 && v.slice(0, eqIdx).toLowerCase().includes("sha256")) {
-    v = v.slice(eqIdx + 1);
-  }
-  v = v.trim().replace(/^"+|"+$/g, ""); // strip any surrounding quotes
+  // strip quotes if any
+  v = v.replace(/^"+|"+$/g, "");
 
-  // Try hex (64 hex chars for SHA-256)
-  if (/^[a-f0-9]{64}$/i.test(v)) {
-    return Buffer.from(v, "hex");
+  // allow "sha256=<hex>"
+  const eq = v.indexOf("=");
+  if (eq > 0 && v.slice(0, eq).toLowerCase().includes("sha256")) {
+    v = v.slice(eq + 1).trim();
   }
-  // Try base64
-  try {
-    const b = Buffer.from(v, "base64");
-    if (b.length > 0) return b;
-  } catch {
-    // fallthrough
-  }
+
+  // must be 64 hex chars
+  if (/^[a-f0-9]{64}$/i.test(v)) return v.toLowerCase();
   return null;
 }
 
@@ -69,6 +61,9 @@ export const handler = async (
     event.headers?.["Content-Type"] ??
     "unknown";
 
+  // Helpful: list header keys we actually received
+  const headerKeys = Object.keys(event.headers || {}).map(k => k.toLowerCase());
+
   console.log(
     JSON.stringify({
       level: "info",
@@ -79,10 +74,11 @@ export const handler = async (
       sourceIp,
       userAgent: ua,
       contentType,
+      headerKeys,
     })
   );
 
-  // Get raw body exactly as sent to the Lambda (decode if API GW set base64 flag)
+  // Get raw body exactly as sent
   const body = event.body ?? "";
   const raw = event.isBase64Encoded ? Buffer.from(body, "base64").toString("utf8") : body;
 
@@ -97,49 +93,74 @@ export const handler = async (
     })
   );
 
-  // Normalize header map (case-insensitive)
-  const headersLower: Record<string, string> = {};
+  // Case-insensitive header map
+  const H: Record<string, string> = {};
   for (const [k, v] of Object.entries(event.headers || {})) {
-    if (typeof v === "string") headersLower[k.toLowerCase()] = v;
+    if (typeof v === "string") H[k.toLowerCase()] = v;
   }
 
-  const providedSigRaw =
-    headersLower["x-hospitable-signature"] ??
-    headersLower["x-signature"] ??
-    headersLower["x-hook-signature"] ??
-    "";
+  // Hospitable docs: header is literally "signature"
+  // Keep fallbacks for safety.
+  const providedSigHeader =
+    H["signature"] ??
+    H["x-hospitable-signature"] ??
+    H["x-signature"] ??
+    null;
+
+  // Log what we think might be the signature (masked)
+  if (providedSigHeader) {
+    const mask =
+      providedSigHeader.length > 12
+        ? `${providedSigHeader.slice(0, 6)}…${providedSigHeader.slice(-6)}`
+        : providedSigHeader;
+    console.log(
+      JSON.stringify({
+        level: "debug",
+        msg: "webhook:headers_probe",
+        reqId,
+        suspectedSigHeaders: { signature: mask, len: providedSigHeader.length },
+      })
+    );
+  }
 
   try {
     const secret = await getSecret();
 
-    // Expected HMAC (as Buffer)
-    const expectedBuf = crypto.createHmac("sha256", secret).update(raw, "utf8").digest();
+    // Expected: HMAC-SHA256(raw) hex
+    const expectedHex = crypto
+      .createHmac("sha256", secret)
+      .update(raw, "utf8")
+      .digest("hex");
 
-    // Incoming signature as Buffer (hex/base64 supported)
-    const providedBuf = parseSignatureToBuffer(providedSigRaw);
+    // Extract hex from header (supports "sha256=<hex>" or "<hex>")
+    const providedHex = extractHexSignature(providedSigHeader);
 
-    const comparable =
-      providedBuf !== null && providedBuf.length === expectedBuf.length;
+    let sigOk = false;
+    let mode: "hex" | "none" = "none";
 
-    const sigOk = comparable
-      ? crypto.timingSafeEqual(expectedBuf, providedBuf!)
-      : false;
+    if (providedHex) {
+      mode = "hex";
+      // constant-time compare
+      const a = Buffer.from(expectedHex, "hex");
+      const b = Buffer.from(providedHex, "hex");
+      sigOk = a.length === b.length && crypto.timingSafeEqual(a, b);
+    }
 
     console.log(
       JSON.stringify({
         level: "info",
         msg: "webhook:signature_check",
         reqId,
-        hasSignatureHeader: Boolean(providedSigRaw),
-        providedLen: providedBuf?.length ?? 0,
-        expectedLen: expectedBuf.length,
-        comparable,
+        hasSignatureHeader: Boolean(providedSigHeader),
+        providedLen: providedHex ? 32 : 0,
+        expectedLen: 32,
+        mode,
         sigOk,
       })
     );
 
     if (!sigOk) {
-      // 401 makes it obvious during setup; switch to 200 to suppress retries if desired
+      // While setting up, 401 is helpful; switch to 200 later to suppress retries.
       return { statusCode: 401, body: JSON.stringify({ error: "invalid signature" }) };
     }
 
