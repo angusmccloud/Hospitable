@@ -16,17 +16,22 @@ Parameters:
     Type: String
     Default: /hospitable/webhook/secret
 
-  # Use an EXISTING Cognito Hosted UI domain; this stack will not create one.
+  # (Kept for reference; we use explicit Dev/Prod ids below)
   ExistingHostedDomain:
     Type: String
     Default: "https://hospitable.auth.us-east-1.amazoncognito.com"
     Description: "Full Hosted UI domain, e.g. https://<prefix>.auth.us-east-1.amazoncognito.com"
 
-  # Chrome Extension ID to compose callback/logout redirect URIs
-  ExtensionId:
+  # --- NEW: Support both Dev & Prod extension IDs ---
+  ProdExtensionId:
     Type: String
-    Default: ""
-    Description: "Chrome extension ID; if set, callback/logout URLs are chrome-extension://<id>/..."
+    Default: "jaipclehdonbnfoamhfollikhkneklgd"
+    Description: "Chrome Web Store (production) extension ID"
+
+  DevExtensionId:
+    Type: String
+    Default: "plmclfameahchocccgglndndhpepjbcj"
+    Description: "Unpacked/dev extension ID (local testing)"
 
   # Token lifetime config
   RefreshTokenDays:
@@ -46,7 +51,8 @@ Globals:
         HOSPITABLE_TOKEN_PARAM: !Ref HospitableTokenParam
 
 Conditions:
-  HasExtensionId: !Not [ !Equals [ !Ref ExtensionId, "" ] ]
+  HasProdId: !Not [ !Equals [ !Ref ProdExtensionId, "" ] ]
+  HasDevId:  !Not [ !Equals [ !Ref DevExtensionId,  "" ] ]
 
 Resources:
   # -----------------------
@@ -95,21 +101,26 @@ Resources:
       AllowedOAuthScopes: [ openid, email, phone, profile ]
       SupportedIdentityProviders: [ COGNITO ]
 
-      # Build redirect URIs from the extension ID when provided
+      # --- Allow BOTH ids & BOTH URL schemes ---
       CallbackURLs:
-        - !If
-          - HasExtensionId
-          - !Sub "chrome-extension://${ExtensionId}/callback"
-          - !Ref "AWS::NoValue"
+        # Prod chromiumapp
+        - !If [ HasProdId, !Sub "https://${ProdExtensionId}.chromiumapp.org/callback", !Ref "AWS::NoValue" ]
+        # Dev chromiumapp
+        - !If [ HasDevId,  !Sub "https://${DevExtensionId}.chromiumapp.org/callback",  !Ref "AWS::NoValue" ]
+        # (optional) chrome-extension:// callback — safe to allow as well
+        - !If [ HasProdId, !Sub "chrome-extension://${ProdExtensionId}/callback", !Ref "AWS::NoValue" ]
+        - !If [ HasDevId,  !Sub "chrome-extension://${DevExtensionId}/callback",  !Ref "AWS::NoValue" ]
+
       LogoutURLs:
-        - !If
-          - HasExtensionId
-          - !Sub "chrome-extension://${ExtensionId}/logout"
-          - !Ref "AWS::NoValue"
+        # We typically use a chrome-extension:// logout, but chromiumapp works too.
+        - !If [ HasProdId, !Sub "chrome-extension://${ProdExtensionId}/logout", !Ref "AWS::NoValue" ]
+        - !If [ HasDevId,  !Sub "chrome-extension://${DevExtensionId}/logout",  !Ref "AWS::NoValue" ]
+        - !If [ HasProdId, !Sub "https://${ProdExtensionId}.chromiumapp.org/callback", !Ref "AWS::NoValue" ]
+        - !If [ HasDevId,  !Sub "https://${DevExtensionId}.chromiumapp.org/callback",  !Ref "AWS::NoValue" ]
 
       # Token lifetimes
-      AccessTokenValidity: 60        # minutes
-      IdTokenValidity: 60            # minutes
+      AccessTokenValidity: 60
+      IdTokenValidity: 60
       RefreshTokenValidity: !Ref RefreshTokenDays
       TokenValidityUnits:
         AccessToken: minutes
