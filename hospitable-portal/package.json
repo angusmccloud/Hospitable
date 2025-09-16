@@ -1,0 +1,38 @@
+{
+  "name": "hospitable-portal",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev --turbopack",
+    "build": "next build --turbopack",
+    "start": "next start",
+    "lint": "eslint"
+  },
+  "dependencies": {
+    "@aws-amplify/ui-react": "^6.12.0",
+    "@emotion/react": "^11.14.0",
+    "@emotion/styled": "^11.14.1",
+    "@mui/icons-material": "^7.3.1",
+    "@mui/material": "^7.3.1",
+    "@mui/x-charts": "^8.11.0",
+    "@mui/x-data-grid-pro": "^8.11.0",
+    "@tanstack/react-query": "^5.85.6",
+    "@tanstack/react-query-persist-client": "^5.85.6",
+    "@tanstack/query-sync-storage-persister": "^5.85.6",
+    "aws-amplify": "^6.15.5",
+    "date-fns": "^4.1.0",
+    "next": "15.5.2",
+    "react": "19.1.0",
+    "react-dom": "19.1.0",
+    "zod": "^4.1.5"
+  },
+  "devDependencies": {
+    "@eslint/eslintrc": "^3",
+    "@types/node": "^20",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "eslint": "^9",
+    "eslint-config-next": "15.5.2",
+    "typescript": "^5"
+  }
+}
