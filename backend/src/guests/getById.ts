@@ -1,5 +1,6 @@
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient, GetCommand } from "@aws-sdk/lib-dynamodb";
+import { mapGuestItem } from "./mapper";
 
 const ddb = new DynamoDBClient({});
 const doc = DynamoDBDocumentClient.from(ddb);
@@ -20,21 +21,16 @@ export const handler = async (event: any) => {
     return { statusCode: 404, body: JSON.stringify({ error: "Guest not found" }) };
   }
   
-  const guest = {
-    guestId: out.Item.guestId,
-    firstName: out.Item.firstName,
-    lastName: out.Item.lastName,
-    emails: out.Item.emails,
-    phoneNumbers: out.Item.phoneNumbers,
-    reservationIds: out.Item.reservationIds,
-    hostNotes: out.Item.hostNotes,
-    location: out.Item.location,
-    createdAt: out.Item.createdAt,
-    updatedAt: out.Item.updatedAt,
-  };
+  const guest = mapGuestItem(out.Item);
   
   return {
     statusCode: 200,
+    headers: {
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Headers': 'Content-Type,Authorization',
+      'Access-Control-Allow-Methods': 'GET,OPTIONS,PUT',
+      'Content-Type': 'application/json',
+    },
     body: JSON.stringify(guest),
   };
 };

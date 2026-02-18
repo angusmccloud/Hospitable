@@ -1,33 +1,35 @@
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
-import { DynamoDBDocumentClient, ScanCommand } from "@aws-sdk/lib-dynamodb";
+import { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
+import { scanAllRows } from "../utils/scanAllRows";
+import { mapGuestItem } from "./mapper";
 
 const ddb = new DynamoDBClient({});
 const doc = DynamoDBDocumentClient.from(ddb);
 const TABLE = process.env.TABLE_NAME!;
 
 export const handler = async () => {
-  const scan = await doc.send(new ScanCommand({
-    TableName: TABLE,
-    FilterExpression: "#e = :entity",
-    ExpressionAttributeNames: { "#e": "entity" },
-    ExpressionAttributeValues: { ":entity": "guest" },
-  }));
+  const raw = await scanAllRows<any>({
+    doc,
+    params: {
+      TableName: TABLE,
+      FilterExpression: "#e = :entity",
+      ExpressionAttributeNames: { "#e": "entity" },
+      ExpressionAttributeValues: { ":entity": "guest" },
+    },
+  });
 
-  const guests = (scan.Items ?? []).map(g => ({
-    guestId: g.guestId,
-    firstName: g.firstName,
-    lastName: g.lastName,
-    emails: g.emails,
-    phoneNumbers: g.phoneNumbers,
-    reservationIds: g.reservationIds,
-    hostNotes: g.hostNotes,
-    location: g.location,
-    createdAt: g.createdAt,
-    updatedAt: g.updatedAt,
-  }));
+  const items = Array.isArray(raw) ? raw : [];
+
+  const guests = items.map(mapGuestItem);
 
   return {
     statusCode: 200,
+    headers: {
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Headers': 'Content-Type,Authorization',
+      'Access-Control-Allow-Methods': 'GET,PUT,OPTIONS',
+      'Content-Type': 'application/json',
+    },
     body: JSON.stringify({ guests }),
   };
 };

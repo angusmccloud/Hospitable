@@ -140,11 +140,13 @@ Resources:
       Cors:
         AllowOrigin: "'*'"
         AllowMethods: "'GET,OPTIONS,PUT'"
+        AllowHeaders: "'Content-Type,Authorization,X-Amz-Date,X-Amz-Security-Token,X-Requested-With'"
       Auth:
         DefaultAuthorizer: CognitoAuthorizer
         Authorizers:
           CognitoAuthorizer:
             UserPoolArn: !GetAtt CognitoUserPool.Arn
+        AddDefaultAuthorizerToCorsPreflight: false
 
   ReservationsApi:
     Type: AWS::Serverless::Api
@@ -153,11 +155,13 @@ Resources:
       Cors:
         AllowOrigin: "'*'"
         AllowMethods: "'GET,OPTIONS'"
+        AllowHeaders: "'Content-Type,Authorization,X-Amz-Date,X-Amz-Security-Token,X-Requested-With'"
       Auth:
         DefaultAuthorizer: CognitoAuthorizer
         Authorizers:
           CognitoAuthorizer:
             UserPoolArn: !GetAtt CognitoUserPool.Arn
+        AddDefaultAuthorizerToCorsPreflight: false
 
   WebhookApi:
     Type: AWS::Serverless::Api

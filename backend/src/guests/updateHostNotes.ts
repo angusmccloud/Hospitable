@@ -84,6 +84,7 @@ function cors() {
     'Access-Control-Allow-Origin': '*',
     'Access-Control-Allow-Headers': 'Content-Type,Authorization',
     'Access-Control-Allow-Methods': 'GET,PUT,OPTIONS',
+      'Content-Type': 'application/json',
   };
 }
 function resp(statusCode: number, body?: unknown) {

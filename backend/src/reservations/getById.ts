@@ -1,5 +1,6 @@
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient, ScanCommand } from "@aws-sdk/lib-dynamodb";
+import { getReservationMapper } from "./mapper";
 
 const ddb = new DynamoDBClient({});
 const doc = DynamoDBDocumentClient.from(ddb);
@@ -24,20 +25,17 @@ export const handler = async (event: any) => {
     return { statusCode: 404, body: JSON.stringify({ error: "Reservation not found" }) };
   }
 
-  const reservation = {
-    reservationId: item.id,
-    propertyId: item.propertyId,
-    guestId: item.guestId ?? item.guest?.id,
-    arrivalDate: item.arrivalDate ?? item.arrival_date,
-    departureDate: item.departureDate ?? item.departure_date,
-    status: item.status,
-    createdAt: item.createdAt,
-    updatedAt: item.updatedAt,
-    // Add other relevant fields as needed
-  };
+  const mapFn = await getReservationMapper(doc, TABLE);
+  const reservation = mapFn(item);
 
   return {
     statusCode: 200,
+    headers: {
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Headers': 'Content-Type,Authorization',
+      'Access-Control-Allow-Methods': 'GET,OPTIONS',
+      'Content-Type': 'application/json',
+    },
     body: JSON.stringify(reservation),
   };
 };
