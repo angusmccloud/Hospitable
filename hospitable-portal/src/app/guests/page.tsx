@@ -1,15 +1,16 @@
 "use client";
 
-import React, { useMemo, useEffect, useState } from 'react';
+import React, { useMemo, useState, useSyncExternalStore } from 'react';
 import { Typography, CircularProgress, Alert, TextField, Stack } from '@mui/material';
 import PortalDataGrid from '../../components/PortalDataGrid';
 import { usePortalData } from '../../hooks/usePortalData';
 
+const emptySubscribe = () => () => {};
+
 export default function GuestsPage() {
   const { guests, isLoading, isError, error } = usePortalData();
   // Ensure first paint (SSR + client) is consistent to avoid hydration mismatch with DataGrid internals
-  const [mounted, setMounted] = useState(false);
-  useEffect(() => { setMounted(true); }, []);
+  const mounted = useSyncExternalStore(emptySubscribe, () => true, () => false);
 
   const columns = useMemo(() => [
     { field: 'guestId', headerName: 'Guest ID', width: 160 },
