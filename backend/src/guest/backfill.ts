@@ -32,7 +32,7 @@ export const handler = async () => {
     const page = await doc.send(
       new ScanCommand({
         TableName: TABLE,
-        FilterExpression: "#e = :res",
+        FilterExpression: "#e = :res AND attribute_not_exists(guestId)",
         ExpressionAttributeNames: { "#e": "entity" },
         ExpressionAttributeValues: { ":res": "reservation" },
         ExclusiveStartKey: lastKey,

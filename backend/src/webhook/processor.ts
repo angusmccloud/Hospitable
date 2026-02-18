@@ -8,6 +8,19 @@ import { ensureConversationIndex, ensureGuestReservationIndex } from "../utils/r
 const sqs = new SQSClient({});
 const GUEST_LINK_QUEUE_URL = process.env.GUEST_LINK_QUEUE_URL!;
 
+/** Only process reservation events that carry meaningful data */
+const RESERVATION_ALLOWLIST = new Set([
+  "reservation.created",
+  "reservation.updated",
+  "reservation.cancelled",
+]);
+
+/** Only process property events that carry meaningful data */
+const PROPERTY_ALLOWLIST = new Set([
+  "property.created",
+  "property.updated",
+]);
+
 export const handler = async (event: SQSEvent): Promise<SQSBatchResponse> => {
   const failures: { itemIdentifier: string }[] = [];
 
@@ -33,7 +46,7 @@ export const handler = async (event: SQSEvent): Promise<SQSBatchResponse> => {
         })
       );
 
-      if (action.startsWith("reservation.")) {
+      if (RESERVATION_ALLOWLIST.has(action)) {
         const reservationSource = payload;
         if (!reservationSource || typeof reservationSource !== "object") {
           console.warn(
@@ -87,13 +100,16 @@ export const handler = async (event: SQSEvent): Promise<SQSBatchResponse> => {
           await ensureGuestReservationIndex(r as any, gid);
         }
 
-        // Kick guest linker (idempotent consumer)
-        await sqs.send(
-          new SendMessageCommand({
-            QueueUrl: GUEST_LINK_QUEUE_URL,
-            MessageBody: JSON.stringify({ type: "reservation", reservation: r }),
-          })
-        );
+        // Only enqueue guest linking for new reservations — updated/cancelled
+        // reservations should already have a guest linked.
+        if (action === "reservation.created") {
+          await sqs.send(
+            new SendMessageCommand({
+              QueueUrl: GUEST_LINK_QUEUE_URL,
+              MessageBody: JSON.stringify({ type: "reservation", reservation: r }),
+            })
+          );
+        }
 
         console.log(
           JSON.stringify({
@@ -104,7 +120,7 @@ export const handler = async (event: SQSEvent): Promise<SQSBatchResponse> => {
             propertyId: (r as any)?.propertyId,
           })
         );
-      } else if (action.startsWith("property.")) {
+      } else if (PROPERTY_ALLOWLIST.has(action)) {
         const propertySource = (payload as any)?.property ?? payload;
         if (!propertySource || typeof propertySource !== "object") {
           console.warn(
@@ -138,7 +154,7 @@ export const handler = async (event: SQSEvent): Promise<SQSBatchResponse> => {
         console.log(
           JSON.stringify({
             level: "info",
-            msg: "webhook:processor:unhandled_action",
+            msg: "webhook:processor:skipped_action",
             action,
           })
         );

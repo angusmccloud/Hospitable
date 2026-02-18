@@ -256,7 +256,7 @@ export async function linkOrCreateGuestForReservation(reservation: Reservation):
     // No identity — create-or-merge by reservation id heuristic:
     // Try to find an existing guest who already has this reservationId (replay-safe).
     // (This is rare in a clean backfill, but helps avoid dupes if reprocessing messages.)
-    const maybeExisting = await tryFindGuestByReservationId(ids.reservationId);
+    const maybeExisting = await tryFindGuestByReservationId(ids.reservationId, reservation.propertyId);
     if (maybeExisting) {
       guestId = maybeExisting as GuestId;
     } else {
@@ -300,10 +300,14 @@ export async function linkOrCreateGuestForReservation(reservation: Reservation):
 }
 
 /** ===== Helpers ===== */
-async function tryFindGuestByReservationId(reservationId: string): Promise<string | null> {
-  // We don’t have a GSI; do a targeted query via email/phone would be better,
-  // but when no identity exists we can’t. Return null to create a new guest.
-  return null;
+async function tryFindGuestByReservationId(reservationId: string, propertyId: string): Promise<string | null> {
+  // Read the reservation from DynamoDB to check if it already has a linked guest
+  const resp = await doc.send(new GetCommand({
+    TableName: TABLE,
+    Key: { pk: `RES#${propertyId}`, sk: reservationId },
+    ProjectionExpression: "guestId",
+  }));
+  return (resp.Item?.guestId as string) ?? null;
 }
 
 async function safeEnsureIdentityRow(kind: "email" | "phone", value: string, guestId: GuestId) {
