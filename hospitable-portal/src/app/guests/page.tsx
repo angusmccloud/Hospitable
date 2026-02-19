@@ -1,63 +1,41 @@
 "use client";
 
-import React, { useMemo, useState, useSyncExternalStore } from 'react';
-import { Typography, CircularProgress, Alert, TextField, Stack } from '@mui/material';
-import PortalDataGrid from '../../components/PortalDataGrid';
+import React, { useMemo, useState } from 'react';
+import { Typography, CircularProgress, Alert, TextField, Stack, Box } from '@mui/material';
+import { Virtuoso } from 'react-virtuoso';
+import GuestCard, { type GuestCardData } from '../../components/GuestCard';
 import { usePortalData } from '../../hooks/usePortalData';
 
-const emptySubscribe = () => () => {};
-
 export default function GuestsPage() {
-  const { guests, isLoading, isError, error } = usePortalData();
-  // Ensure first paint (SSR + client) is consistent to avoid hydration mismatch with DataGrid internals
-  const mounted = useSyncExternalStore(emptySubscribe, () => true, () => false);
+  const { guests, reservationsByGuest, isLoading, isError, error } = usePortalData();
 
-  const columns = useMemo(() => [
-    { field: 'guestId', headerName: 'Guest ID', width: 160 },
-    { field: 'firstName', headerName: 'First', width: 140 },
-    { field: 'lastName', headerName: 'Last', width: 140 },
-    { field: 'emailDisplay', headerName: 'Email', width: 260 },
-    { field: 'phoneDisplay', headerName: 'Phone', width: 180 },
-    { field: 'reservationCount', headerName: 'Res Count', type: 'number', width: 120 },
-    { field: 'firstArrival', headerName: 'First Arrival', width: 140 },
-    { field: 'lastDeparture', headerName: 'Last Departure', width: 150 },
-    { field: 'location', headerName: 'Location', width: 160 },
-    // hostNotes kept in row object for drill-in; omit column for cleanliness
-  ], []);
-
-  const rows = useMemo(() => {
-    function properCase(s?: string | null): string | null {
-      if (!s) return s ?? null;
-      return s.toLowerCase().replace(/\b([a-z])/g, c => c.toUpperCase());
-    }
-    function fmtPhone(raw?: string | null): string | null {
-      if (!raw) return raw ?? null;
-      let p = raw.replace(/[^0-9]/g, '');
-      if (p.length === 11 && p.startsWith('1')) p = p.slice(1);
-      if (p.length === 10) return `(${p.slice(0,3)}) ${p.slice(3,6)}-${p.slice(6)}`;
-      return raw; // leave as-is if not 10 (after optional leading 1)
-    }
-    return (guests || []).map(g => {
-      const emailCount = g.emails?.length || 0;
-      const phoneCount = g.phoneNumbers?.length || 0;
-      const firstEmail = g.emails?.[0] || '';
-      const firstPhoneRaw = g.phoneNumbers?.[0] || '';
-      const phoneFormatted = fmtPhone(firstPhoneRaw);
-      const emailDisplay = emailCount > 1 ? `${firstEmail} (1 of ${emailCount})` : firstEmail;
-      const phoneDisplay = phoneCount > 1 ? `${phoneFormatted || ''} (1 of ${phoneCount})` : (phoneFormatted || '');
-      return {
-        id: g.guestId,
-        ...g,
-        firstName: properCase(g.firstName) || '',
-        lastName: properCase(g.lastName) || '',
-        reservationCount: g.reservationIds?.length || 0,
-        emailDisplay,
-        phoneDisplay,
-      };
+  const rows: GuestCardData[] = useMemo(() => {
+    const mapped = (guests || []).map(g => ({
+      guestId: g.guestId,
+      firstName: g.firstName,
+      lastName: g.lastName,
+      emails: g.emails,
+      phoneNumbers: g.phoneNumbers,
+      hostNotes: g.hostNotes,
+      location: g.location,
+      reservations: (reservationsByGuest[g.guestId] || []).map(r => ({
+        reservationId: r.reservationId,
+        arrivalDate: r.arrivalDate,
+        departureDate: r.departureDate,
+        nights: r.nights,
+        status: r.status,
+        propertyName: r.propertyName,
+        conversationId: r.conversationId,
+      })).sort((a, b) => (b.arrivalDate || '').localeCompare(a.arrivalDate || '')),
+    }));
+    mapped.sort((a, b) => {
+      const nameA = `${(a.firstName || '').toLowerCase()} ${(a.lastName || '').toLowerCase()}`;
+      const nameB = `${(b.firstName || '').toLowerCase()} ${(b.lastName || '').toLowerCase()}`;
+      return nameA.localeCompare(nameB);
     });
-  }, [guests]);
+    return mapped;
+  }, [guests, reservationsByGuest]);
 
-  // Quick full-text search across JSON string
   const [search, setSearch] = useState('');
   const filteredRows = useMemo(() => {
     const terms = search.trim().toLowerCase().split(/\s+/).filter(Boolean);
@@ -68,11 +46,11 @@ export default function GuestsPage() {
     });
   }, [rows, search]);
 
-  if (isLoading || !mounted) return <Loading />; // keep consistent SSR/CSR shell
+  if (isLoading) return <Loading />;
   if (isError) return <ErrorView message={(error as Error)?.message || 'Error'} />;
 
   return (
-    <Stack spacing={1} sx={{ flex: 1, minHeight: 0 }}>
+    <Stack spacing={1} sx={{ flex: 1, minHeight: 0, height: '100%' }}>
       <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2} alignItems={{ sm: 'center' }} justifyContent="space-between" sx={{ mb: 1 }}>
         <Typography variant="h5">Guests ({filteredRows.length})</Typography>
         <TextField
@@ -83,7 +61,14 @@ export default function GuestsPage() {
           onChange={e => setSearch(e.target.value)}
         />
       </Stack>
-      <PortalDataGrid rows={filteredRows} columns={columns as any} />
+      <Box sx={{ flex: 1, minHeight: 0, position: 'relative' }}>
+        <Virtuoso
+          style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0 }}
+          totalCount={filteredRows.length}
+          itemContent={index => <GuestCard guest={filteredRows[index]} />}
+          overscan={200}
+        />
+      </Box>
     </Stack>
   );
 }

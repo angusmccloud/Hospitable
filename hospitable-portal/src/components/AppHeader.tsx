@@ -47,7 +47,7 @@ export const AppHeader: React.FC = () => {
   return (
     <>
       <AppBar position="fixed">
-        <Toolbar sx={{ gap: 2 }}>          
+        <Toolbar sx={{ gap: 2 }}>
           <IconButton
             edge="start"
             color="inherit"
@@ -58,24 +58,43 @@ export const AppHeader: React.FC = () => {
             <MenuIcon />
           </IconButton>
           <Typography variant="h6" component={Link} href="/" style={{ textDecoration: 'none', flexGrow: { xs: 1, md: 0 } as any }}>
-            Hospitable Portal
+            Hospitable CRM
           </Typography>
-          <Stack direction="row" spacing={1} sx={{ ml: 4, display: { xs: 'none', md: 'flex' }, flexGrow: 1 }}>
-            {navItems.map(item => (
-              <Button
-                key={item.href}
-                component={Link}
-                href={item.href}
-                color={pathname === item.href ? 'primary' : 'inherit'}
-                variant={pathname === item.href ? 'contained' : 'text'}
-                size="small"
-                startIcon={item.icon as any}
-              >
-                {item.label}
-              </Button>
-            ))}
+          <Stack direction="row" spacing={0.5} sx={{ ml: 4, display: { xs: 'none', md: 'flex' }, flexGrow: 1 }}>
+            {navItems.map(item => {
+              const active = pathname === item.href;
+              return (
+                <Button
+                  key={item.href}
+                  component={Link}
+                  href={item.href}
+                  color="inherit"
+                  size="small"
+                  startIcon={item.icon as any}
+                  sx={{
+                    textTransform: 'none',
+                    fontWeight: active ? 600 : 400,
+                    borderBottom: active ? '2px solid' : '2px solid transparent',
+                    borderRadius: 0,
+                    px: 1.5,
+                    py: 1,
+                    opacity: active ? 1 : 0.8,
+                    '&:hover': { opacity: 1, borderBottomColor: 'rgba(255,255,255,0.5)' },
+                  }}
+                >
+                  {item.label}
+                </Button>
+              );
+            })}
           </Stack>
-          <Button onClick={handleSignOut} color="inherit" startIcon={<LogoutIcon fontSize="small" />}>Sign out</Button>
+          <Button
+            onClick={handleSignOut}
+            color="inherit"
+            startIcon={<LogoutIcon fontSize="small" />}
+            sx={{ display: { xs: 'none', md: 'flex' } }}
+          >
+            Sign out
+          </Button>
         </Toolbar>
       </AppBar>
       <Toolbar /> {/* spacer for fixed app bar */}

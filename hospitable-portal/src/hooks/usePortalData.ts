@@ -80,20 +80,35 @@ export function usePortalData() {
   }, [guestsQ.data]);
 
   const enrichedReservations = useMemo(() => {
+    // Pre-compute stay numbers: for each guest, sort their reservations by arrival date
+    // and assign ordinal (1st, 2nd, etc.)
+    const stayNumberMap: Record<string, number> = {};
+    Object.entries(reservationsByGuest).forEach(([, guestRes]) => {
+      const sorted = [...guestRes]
+        .filter(r => (r.status || '').toLowerCase() === 'accepted')
+        .sort((a, b) => (a.arrivalDate || '').localeCompare(b.arrivalDate || ''));
+      sorted.forEach((r, i) => { stayNumberMap[r.reservationId] = i + 1; });
+    });
+
     return (reservationsQ.data || []).map(r => {
       const g = r.guestId ? guestsIndex[r.guestId] : undefined;
+      const guestResCount = r.guestId ? (reservationsByGuest[r.guestId] || []).filter(gr => (gr.status || '').toLowerCase() === 'accepted').length : 0;
       return {
         ...r,
         guestFirstName: g?.firstName || null,
         guestLastName: g?.lastName || null,
         guestPrimaryEmail: g?.emails?.[0] || null,
-      } as Reservation & { guestFirstName: string | null; guestLastName: string | null; guestPrimaryEmail: string | null };
+        hostNotes: g?.hostNotes || null,
+        stayNumber: stayNumberMap[r.reservationId] || null,
+        guestTotalStays: guestResCount,
+      } as Reservation & { guestFirstName: string | null; guestLastName: string | null; guestPrimaryEmail: string | null; hostNotes: string | null; stayNumber: number | null; guestTotalStays: number };
     });
-  }, [reservationsQ.data, guestsIndex]);
+  }, [reservationsQ.data, guestsIndex, reservationsByGuest]);
 
   return {
     guests: enrichedGuests,
     reservations: enrichedReservations,
+    reservationsByGuest,
     guestsQuery: guestsQ,
     reservationsQuery: reservationsQ,
     isLoading: guestsQ.isLoading || reservationsQ.isLoading,

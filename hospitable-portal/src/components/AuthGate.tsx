@@ -50,7 +50,7 @@ const AuthGate: React.FC<{ children: React.ReactNode }> = ({ children }) => {
 
   // Render a stable shell to avoid SSR/CSR divergence; swap inner content client-side only
   return (
-    <div data-role="auth-gate">
+    <div data-role="auth-gate" style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
       {checking ? (
         <div style={centerStyle}>
           <CircularProgress />

@@ -23,12 +23,17 @@ export type Reservation = {
   reservationId: string; // primary identifier from backend
   id?: string; // temporary alias until all components use reservationId
   propertyId?: string | null;
+  propertyName?: string | null;
   guestId?: string | null;
   arrivalDate?: string | null;
   departureDate?: string | null;
   status?: string | null;
   platform?: string | null;
   nights?: number | null;
+  conversationId?: string | null;
+  financials?: any | null;
+  guests?: { total?: number | null; adult_count?: number | null; child_count?: number | null; infant_count?: number | null; pet_count?: number | null } | null;
+  review?: any | null;
   createdAt?: string | null;
   updatedAt?: string | null;
 };

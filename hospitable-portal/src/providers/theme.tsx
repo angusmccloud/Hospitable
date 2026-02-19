@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useMemo } from 'react';
-import { ThemeProvider, createTheme, CssBaseline, responsiveFontSizes, type Theme } from '@mui/material';
+import { ThemeProvider, createTheme, CssBaseline, responsiveFontSizes } from '@mui/material';
 
 /**
  * AppThemeProvider selects light/dark mode from system preference and
@@ -34,18 +34,6 @@ export const AppThemeProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         },
         MuiPaper: {
           styleOverrides: { root: { backgroundImage: 'none' } },
-        },
-        MuiDataGrid: {
-          styleOverrides: {
-            root: ({ theme }: { theme: Theme }) => ({
-              backgroundColor: theme.palette.background.paper,
-              border: `1px solid ${theme.palette.divider}`,
-            }),
-            columnHeaders: ({ theme }: { theme: Theme }) => ({
-              backgroundColor: '#f5f5f5',
-              borderBottom: `1px solid ${theme.palette.divider}`,
-            }),
-          },
         },
       },
     });
