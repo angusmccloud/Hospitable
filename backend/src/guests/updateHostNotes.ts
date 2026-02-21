@@ -19,6 +19,11 @@ const TABLE_NAME = process.env.TABLE_NAME || 'HospitableData';
 const SK = 'PROFILE';
 
 export const handler: APIGatewayProxyHandlerV2 = async (event) => {
+  // Warmup check - exit immediately to keep container warm
+  if ((event as any)?.warmup) {
+    return { statusCode: 200, body: JSON.stringify({ warmup: true }) };
+  }
+
   try {
     const guestId = event.pathParameters?.guestId;
     if (!guestId) {

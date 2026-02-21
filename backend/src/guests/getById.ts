@@ -7,6 +7,11 @@ const doc = DynamoDBDocumentClient.from(ddb);
 const TABLE = process.env.TABLE_NAME!;
 
 export const handler = async (event: any) => {
+  // Warmup check - exit immediately to keep container warm
+  if (event?.warmup) {
+    return { statusCode: 200, body: JSON.stringify({ warmup: true }) };
+  }
+
   const guestId = event.pathParameters?.guestId;
   if (!guestId) {
     return { statusCode: 400, body: JSON.stringify({ error: "Missing guestId" }) };

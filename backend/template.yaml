@@ -196,9 +196,6 @@ Resources:
                 - dynamodb:Query
                 - dynamodb:BatchGetItem
               Resource: !GetAtt HospitableTable.Arn
-      AutoPublishAlias: live
-      ProvisionedConcurrencyConfig:
-        ProvisionedConcurrentExecutions: 1
       Events:
         GuestByConversationId:
           Type: Api
@@ -626,6 +623,58 @@ Resources:
       FunctionName: !Ref GuestBackfillFn
       Principal: events.amazonaws.com
       SourceArn: !GetAtt NightlyGuestCatchup.Arn
+
+  # -----------------------
+  # Lambda Warmup (API endpoints only)
+  # -----------------------
+  WarmupOrchestratorFn:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: dist/warmup/orchestrator.handler
+      Runtime: nodejs20.x
+      Timeout: 30
+      MemorySize: 256
+      Description: Orchestrates warmup invocations for API endpoint Lambdas
+      Environment:
+        Variables:
+          GET_GUEST_BY_CONVERSATION_ID_FN: !Ref GetGuestByConversationIdFn
+          GET_GUESTS_FN: !Ref GetGuestsFn
+          GET_GUEST_BY_ID_FN: !Ref GetGuestByIdFn
+          UPDATE_GUEST_HOST_NOTES_FN: !Ref UpdateGuestHostNotesFn
+          GET_RESERVATIONS_FN: !Ref GetReservationsFn
+          GET_RESERVATION_BY_ID_FN: !Ref GetReservationByIdFn
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action: lambda:InvokeFunction
+              Resource:
+                - !GetAtt GetGuestByConversationIdFn.Arn
+                - !GetAtt GetGuestsFn.Arn
+                - !GetAtt GetGuestByIdFn.Arn
+                - !GetAtt UpdateGuestHostNotesFn.Arn
+                - !GetAtt GetReservationsFn.Arn
+                - !GetAtt GetReservationByIdFn.Arn
+
+  WarmupSchedule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Keep API Lambda functions warm via orchestrator
+      ScheduleExpression: rate(5 minutes)
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt WarmupOrchestratorFn.Arn
+          Id: WarmupOrchestrator
+
+  WarmupOrchestratorPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref WarmupOrchestratorFn
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt WarmupSchedule.Arn
 
   # -----------------------
   # One-off admin
