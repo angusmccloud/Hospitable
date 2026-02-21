@@ -2,9 +2,43 @@
 
 import React, { useMemo, useState } from 'react';
 import { Typography, CircularProgress, Alert, TextField, Stack, Box } from '@mui/material';
-import { Virtuoso } from 'react-virtuoso';
+import { VirtuosoGrid } from 'react-virtuoso';
 import GuestCard, { type GuestCardData } from '../../components/GuestCard';
 import { usePortalData } from '../../hooks/usePortalData';
+
+/* ── Responsive grid wrappers for VirtuosoGrid ─────────────────────── */
+
+const ListContainer = React.forwardRef<HTMLDivElement, React.HTMLAttributes<HTMLDivElement>>(
+  ({ style, children, ...props }, ref) => (
+    <div
+      ref={ref}
+      {...props}
+      style={{ display: 'flex', flexWrap: 'wrap', ...style }}
+    >
+      {children}
+    </div>
+  ),
+);
+ListContainer.displayName = 'ListContainer';
+
+/** 3 cols ≥ 1200 px · 2 cols ≥ 600 px · 1 col below */
+const ItemContainer: React.FC<React.HTMLAttributes<HTMLDivElement> & { 'data-index'?: number }> = (props) => (
+  <Box
+    {...props}
+    sx={{
+      width: '100%',
+      boxSizing: 'border-box',
+      px: 0.75,
+      pb: 0,
+      '@media (min-width: 600px)': { width: '50%' },
+      '@media (min-width: 1200px)': { width: '33.333%' },
+    }}
+  />
+);
+
+const gridComponents = { List: ListContainer, Item: ItemContainer };
+
+/* ── Page ───────────────────────────────────────────────────────────── */
 
 export default function GuestsPage() {
   const { guests, reservationsByGuest, isLoading, isError, error } = usePortalData();
@@ -62,9 +96,10 @@ export default function GuestsPage() {
         />
       </Stack>
       <Box sx={{ flex: 1, minHeight: 0, position: 'relative' }}>
-        <Virtuoso
+        <VirtuosoGrid
           style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0 }}
           totalCount={filteredRows.length}
+          components={gridComponents}
           itemContent={index => <GuestCard guest={filteredRows[index]} />}
           overscan={200}
         />

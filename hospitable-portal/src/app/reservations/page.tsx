@@ -8,24 +8,80 @@ import {
   TextField,
   Stack,
   Box,
-  ToggleButtonGroup,
-  ToggleButton,
   FormControlLabel,
   Switch,
+  FormControl,
+  InputLabel,
+  Select,
+  MenuItem,
 } from '@mui/material';
-import { Virtuoso } from 'react-virtuoso';
+import { VirtuosoGrid } from 'react-virtuoso';
+import { LocalizationProvider } from '@mui/x-date-pickers/LocalizationProvider';
+import { AdapterDateFns } from '@mui/x-date-pickers/AdapterDateFns';
+import { DatePicker } from '@mui/x-date-pickers/DatePicker';
+import { format as fmtDateFns } from 'date-fns';
 import ReservationCard, { type ReservationCardData } from '../../components/ReservationCard';
 import { usePortalData } from '../../hooks/usePortalData';
 
+/* ── Responsive grid wrappers for VirtuosoGrid ─────────────────────── */
+
+const ListContainer = React.forwardRef<HTMLDivElement, React.HTMLAttributes<HTMLDivElement>>(
+  ({ style, children, ...props }, ref) => (
+    <div
+      ref={ref}
+      {...props}
+      style={{ display: 'flex', flexWrap: 'wrap', ...style }}
+    >
+      {children}
+    </div>
+  ),
+);
+ListContainer.displayName = 'ListContainer';
+
+/** 2 cols ≥ 600 px · 1 col below */
+const ItemContainer: React.FC<React.HTMLAttributes<HTMLDivElement> & { 'data-index'?: number }> = (props) => (
+  <Box
+    {...props}
+    sx={{
+      width: '100%',
+      boxSizing: 'border-box',
+      px: 0.75,
+      pb: 0,
+      '@media (min-width: 600px)': { width: '50%' },
+    }}
+  />
+);
+
+const gridComponents = { List: ListContainer, Item: ItemContainer };
+
+/* ── Sort options ───────────────────────────────────────────────────── */
+
 type SortMode = 'date-desc' | 'date-asc' | 'nights-desc' | 'nights-asc';
+
+const SORT_OPTIONS: { value: SortMode; label: string }[] = [
+  { value: 'date-desc', label: 'Date (newest)' },
+  { value: 'date-asc', label: 'Date (oldest)' },
+  { value: 'nights-desc', label: 'Nights (most)' },
+  { value: 'nights-asc', label: 'Nights (fewest)' },
+];
+
+/* ── Helpers ────────────────────────────────────────────────────────── */
+
+/** Convert a Date to 'yyyy-MM-dd' for comparison, or '' */
+function toISODate(d: Date | null): string {
+  if (!d || isNaN(d.getTime())) return '';
+  return fmtDateFns(d, 'yyyy-MM-dd');
+}
+
+/* ── Page ───────────────────────────────────────────────────────────── */
 
 export default function ReservationsPage() {
   const { reservations, isLoading, isError, error } = usePortalData();
 
   const [search, setSearch] = useState('');
   const [sortMode, setSortMode] = useState<SortMode>('date-desc');
-  const [dateFrom, setDateFrom] = useState('');
-  const [dateTo, setDateTo] = useState('');
+  const [dateFrom, setDateFrom] = useState<Date | null>(null);
+  const [dateTo, setDateTo] = useState<Date | null>(null);
   const [returningOnly, setReturningOnly] = useState(false);
 
   const rows: ReservationCardData[] = useMemo(() => (reservations || []).map(r => {
@@ -59,11 +115,13 @@ export default function ReservationsPage() {
     });
 
     // Date range filter on check-in date
-    if (dateFrom) {
-      base = base.filter(r => r.arrivalDate && r.arrivalDate.slice(0, 10) >= dateFrom);
+    const fromStr = toISODate(dateFrom);
+    const toStr = toISODate(dateTo);
+    if (fromStr) {
+      base = base.filter(r => r.arrivalDate && r.arrivalDate.slice(0, 10) >= fromStr);
     }
-    if (dateTo) {
-      base = base.filter(r => r.arrivalDate && r.arrivalDate.slice(0, 10) <= dateTo);
+    if (toStr) {
+      base = base.filter(r => r.arrivalDate && r.arrivalDate.slice(0, 10) <= toStr);
     }
 
     // Returning guests filter
@@ -103,71 +161,69 @@ export default function ReservationsPage() {
   if (isError) return <ErrorView message={(error as Error)?.message || 'Error'} />;
 
   return (
-    <Stack spacing={1} sx={{ flex: 1, minHeight: 0, height: '100%' }}>
-      {/* Header row */}
-      <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2} alignItems={{ sm: 'center' }} justifyContent="space-between" sx={{ mb: 0.5 }}>
-        <Typography variant="h5">Reservations ({filteredRows.length})</Typography>
-        <TextField
-          size="small"
-          label="Search"
-          placeholder="Search reservations"
-          value={search}
-          onChange={e => setSearch(e.target.value)}
-        />
+    <LocalizationProvider dateAdapter={AdapterDateFns}>
+      <Stack spacing={1} sx={{ flex: 1, minHeight: 0, height: '100%' }}>
+        {/* Header row */}
+        <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2} alignItems={{ sm: 'center' }} justifyContent="space-between" sx={{ mb: 0.5 }}>
+          <Typography variant="h5">Reservations ({filteredRows.length})</Typography>
+          <TextField
+            size="small"
+            label="Search"
+            placeholder="Search reservations"
+            value={search}
+            onChange={e => setSearch(e.target.value)}
+          />
+        </Stack>
+
+        {/* Filters row */}
+        <Stack direction="row" spacing={2} flexWrap="wrap" alignItems="center" sx={{ mb: 0.5 }}>
+          {/* Sort dropdown */}
+          <FormControl size="small" sx={{ minWidth: 160 }}>
+            <InputLabel>Sort by</InputLabel>
+            <Select
+              value={sortMode}
+              label="Sort by"
+              onChange={e => setSortMode(e.target.value as SortMode)}
+            >
+              {SORT_OPTIONS.map(o => (
+                <MenuItem key={o.value} value={o.value}>{o.label}</MenuItem>
+              ))}
+            </Select>
+          </FormControl>
+
+          {/* Date range filter */}
+          <DatePicker
+            label="Check-in from"
+            value={dateFrom}
+            onChange={setDateFrom}
+            slotProps={{ textField: { size: 'small', sx: { width: 170 } } }}
+          />
+          <DatePicker
+            label="Check-in to"
+            value={dateTo}
+            onChange={setDateTo}
+            slotProps={{ textField: { size: 'small', sx: { width: 170 } } }}
+          />
+
+          {/* Returning guests toggle */}
+          <FormControlLabel
+            control={<Switch checked={returningOnly} onChange={(_, v) => setReturningOnly(v)} size="small" />}
+            label="Returning guests"
+          />
+        </Stack>
+
+        {/* Virtualized masonry grid */}
+        <Box sx={{ flex: 1, minHeight: 0, position: 'relative' }}>
+          <VirtuosoGrid
+            style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0 }}
+            totalCount={filteredRows.length}
+            components={gridComponents}
+            itemContent={index => <ReservationCard reservation={filteredRows[index]} />}
+            overscan={200}
+          />
+        </Box>
       </Stack>
-
-      {/* Filters row */}
-      <Stack direction="row" spacing={2} flexWrap="wrap" alignItems="center" sx={{ mb: 0.5 }}>
-        {/* Sort */}
-        <ToggleButtonGroup
-          size="small"
-          exclusive
-          value={sortMode}
-          onChange={(_, v) => v && setSortMode(v as SortMode)}
-        >
-          <ToggleButton value="date-desc">Date ↓</ToggleButton>
-          <ToggleButton value="date-asc">Date ↑</ToggleButton>
-          <ToggleButton value="nights-desc">Nights ↓</ToggleButton>
-          <ToggleButton value="nights-asc">Nights ↑</ToggleButton>
-        </ToggleButtonGroup>
-
-        {/* Date range filter */}
-        <TextField
-          size="small"
-          type="date"
-          label="Check-in from"
-          value={dateFrom}
-          onChange={e => setDateFrom(e.target.value)}
-          slotProps={{ inputLabel: { shrink: true } }}
-          sx={{ width: 160 }}
-        />
-        <TextField
-          size="small"
-          type="date"
-          label="Check-in to"
-          value={dateTo}
-          onChange={e => setDateTo(e.target.value)}
-          slotProps={{ inputLabel: { shrink: true } }}
-          sx={{ width: 160 }}
-        />
-
-        {/* Returning guests toggle */}
-        <FormControlLabel
-          control={<Switch checked={returningOnly} onChange={(_, v) => setReturningOnly(v)} size="small" />}
-          label="Returning guests"
-        />
-      </Stack>
-
-      {/* Virtualized list */}
-      <Box sx={{ flex: 1, minHeight: 0, position: 'relative' }}>
-        <Virtuoso
-          style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0 }}
-          totalCount={filteredRows.length}
-          itemContent={index => <ReservationCard reservation={filteredRows[index]} />}
-          overscan={200}
-        />
-      </Box>
-    </Stack>
+    </LocalizationProvider>
   );
 }
 
